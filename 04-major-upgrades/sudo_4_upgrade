@@ -1,0 +1,10 @@
+# Enable enterprisedb to manage the EPAS 14 (old) and EPAS 17 (new) services
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl stop edb-as-14
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl start edb-as-14
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl restart edb-as-14
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl status edb-as-14
+
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl stop edb-as-17
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl start edb-as-17
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl restart edb-as-17
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl status edb-as-17

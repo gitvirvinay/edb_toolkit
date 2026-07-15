@@ -4,27 +4,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../config/logger.sh"
 
-OLD_SERVICE="edb-as-14"
-NEW_SERVICE="edb-as-17"
 OLD_BIN="/usr/edb/as14/bin"
 NEW_BIN="/usr/edb/as17/bin"
 OLD_DATA="/pgdata/as14/data"
 NEW_DATA="/pgdata/as17/data"
-EXPECTED_USER="enterprisedb"
+OS_USER="enterprisedb"
 
-# --- USER CONTEXT CHECK ---
-# Ensure we are running as enterprisedb, NOT root
-CURRENT_USER=$(whoami)
-if [ "$CURRENT_USER" == "root" ]; then
-    log_error "Do not run this script as root. Please execute it as the '${EXPECTED_USER}' user."
-    exit 1
-fi
-if [ "$CURRENT_USER" != "$EXPECTED_USER" ]; then
-    log_error "This script must be executed as the '${EXPECTED_USER}' user (currently: ${CURRENT_USER})."
-    exit 1
-fi
+[ "$EUID" -eq 0 ] || { log_error "Run as root."; exit 1; }
 
 # --- DISK SPACE CHECK ---
+# Upgrading without --link copies data. Ensure the target partition has enough space.
 log_info "Verifying disk space allocation..."
 OLD_DATA_SIZE_KB=$(du -s "$OLD_DATA" | awk '{print $1}')
 NEW_DATA_DIR=$(dirname "$NEW_DATA")
@@ -65,35 +54,26 @@ cd /tmp
 
 # --- PREFLIGHT RUN (CHECK MODE) ---
 log_info "Executing structural compatibility preflight analysis (No-Link Copy Mode)..."
-"$NEW_BIN/pg_upgrade" \
+sudo -u "$OS_USER" PGDATAKEYWRAPCMD="$PGDATAKEYWRAPCMD" PGDATAKEYUNWRAPCMD="$PGDATAKEYUNWRAPCMD" \
+    "$NEW_BIN/pg_upgrade" \
     --old-datadir="$OLD_DATA" --new-datadir="$NEW_DATA" \
     --old-bindir="$OLD_BIN" --new-bindir="$NEW_BIN" \
     --check
 
-read -p "Preflight passed. Ready to shut down database services and upgrade? (y/N): " CONFIRM
+read -p "Preflight passed. Trigger COPY-based database migration? (y/N): " CONFIRM
 [[ "$CONFIRM" =~ ^[Yy]$ ]] || { log_info "Aborted."; exit 0; }
-
-# --- STOP SERVICES ---
-log_info "Stopping old database service (${OLD_SERVICE}) via sudo..."
-sudo systemctl stop "$OLD_SERVICE"
-
-log_info "Ensuring new database service (${NEW_SERVICE}) is stopped before upgrade..."
-sudo systemctl stop "$NEW_SERVICE"
 
 # --- ACTUAL RUN (COPY MODE) ---
 log_info "Starting database file copy upgrade... (This may take a while depending on DB size)"
-"$NEW_BIN/pg_upgrade" \
+sudo -u "$OS_USER" PGDATAKEYWRAPCMD="$PGDATAKEYWRAPCMD" PGDATAKEYUNWRAPCMD="$PGDATAKEYUNWRAPCMD" \
+    "$NEW_BIN/pg_upgrade" \
     --old-datadir="$OLD_DATA" --new-datadir="$NEW_DATA" \
     --old-bindir="$OLD_BIN" --new-bindir="$NEW_BIN"
 
-# --- START NEW SERVICE ---
-log_info "Starting new database service (${NEW_SERVICE}) via sudo..."
-sudo systemctl start "$NEW_SERVICE"
-
 if [ -f "./analyze_new_cluster.sh" ]; then
     log_info "Rebuilding database statistics optimization tables..."
-    bash ./analyze_new_cluster.sh
+    sudo -u "$OS_USER" bash ./analyze_new_cluster.sh
 fi
 
-log_audit "Major upgrade completed (Copy-mode) as enterprisedb: ${OLD_DATA} -> ${NEW_DATA}"
+log_audit "Major upgrade completed (Copy-mode): ${OLD_DATA} -> ${NEW_DATA}"
 log_info "Note: The old cluster data remains in ${OLD_DATA}. You can manually delete it once validated."
