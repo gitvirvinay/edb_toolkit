@@ -1,0 +1,3 @@
+local   all             all                                     scram-sha-256
+hostssl all             all             ${SUBNET_CIDR}          scram-sha-256
+hostssl replication     replicator      ${STANDBY_HOST}/32       scram-sha-256

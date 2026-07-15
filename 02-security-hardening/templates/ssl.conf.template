@@ -1,0 +1,8 @@
+ssl = on
+ssl_ca_file = '${SECURITY_TOP}/root.crt'
+ssl_cert_file = '${SECURITY_TOP}/server_chained.crt'
+ssl_key_file = '${SECURITY_TOP}/server.key'
+ssl_prefer_server_ciphers = on
+ssl_ciphers = 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256'
+ssl_min_protocol_version = 'TLSv1.2'
+${PASSPHRASE_LINE}

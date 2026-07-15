@@ -1,0 +1,26 @@
+# Sudoers rules for EPAS automation
+# Install with: sudo cp config/sudoers.d/epas-automation /etc/sudoers.d/
+# Validate with: sudo visudo -c -f /etc/sudoers.d/epas-automation
+
+# SSL passphrase support via systemd-ask-password
+enterprisedb ALL=(root) NOPASSWD: /bin/systemd-ask-password
+
+# EPAS 15 service control
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl stop edb-as-15
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl start edb-as-15
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl reload edb-as-15
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl restart edb-as-15
+
+# EPAS 17 service control
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl stop edb-as-17
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl start edb-as-17
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl reload edb-as-17
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl restart edb-as-17
+
+# EFM service control (Explicit targets to prevent wildcard privilege escalations)
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl stop edb-efm-5.3
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl start edb-efm-5.3
+enterprisedb ALL=(root) NOPASSWD: /bin/systemctl restart edb-efm-5.3
+
+# pgBackRest
+enterprisedb ALL=(root) NOPASSWD: /usr/bin/pgbackrest
