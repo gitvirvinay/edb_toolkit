@@ -1,0 +1,226 @@
+## Recommended Installation Command
+
+```bash
+sudo dnf install -y \
+    edb-as17-server \
+    edb-as17-server-edb_wait_states \
+    edb-as17-server-pgaudit \
+    edb-as17-server-pg_cron \
+    edb-as17-server-pg_repack \
+    edb-pwr \
+    edb-lasso \
+    edb-as17-server-contrib \
+    edb-as17-server-pldebugger \
+    edb-as17-server-plpython3 \
+    edb-as17-server-plperl \
+    edb-as17-server-pltcl \
+    edb-as17-server-sslutils \
+    edb-as17-server-indexadvisor \
+    edb-as17-server-sqlprofiler \
+    edb-as17-server-sqlprotect \
+    edb-as17-server-efm \
+    edb-as17-server-pgpool \
+    edb-as17-server-pem-agent
+```
+
+---
+
+## Package Breakdown
+
+| Package | Purpose | Category |
+|---------|---------|----------|
+| `edb-as17-server` | Core EPAS 17 server | **Required** |
+| `edb-as17-server-edb_wait_states` | Wait event monitoring | **Performance** |
+| `edb-as17-server-pgaudit` | Audit logging | **Security** |
+| `edb-as17-server-pg_cron` | Job scheduler | **Automation** |
+| `edb-as17-server-pg_repack` | Online table reorganization | **Maintenance** |
+| `edb-pwr` | Performance workload reports | **Reporting** |
+| `edb-lasso` | Diagnostic data collection tool | **Support/Diagnostics** |
+| `edb-as17-server-contrib` | Standard PostgreSQL contrib extensions (includes `auto_explain`, `pg_stat_statements`, `pg_buffercache`, `pg_freespacemap`, etc.) | **Utilities** |
+| `edb-as17-server-pldebugger` | PL/pgSQL debugger | **Development** |
+| `edb-as17-server-plpython3` | Python 3 procedural language | **Development** |
+| `edb-as17-server-plperl` | Perl procedural language | **Development** |
+| `edb-as17-server-pltcl` | Tcl procedural language | **Development** |
+| `edb-as17-server-sslutils` | SSL certificate management | **Security** |
+| `edb-as17-server-indexadvisor` | Index recommendation tool | **Performance** |
+| `edb-as17-server-sqlprofiler` | SQL profiling tool | **Performance** |
+| `edb-as17-server-sqlprotect` | SQL injection protection | **Security** |
+| `edb-as17-server-efm` | Failover Manager (HA) | **High Availability** |
+| `edb-as17-server-pgpool` | Connection pooling | **Performance/HA** |
+| `edb-as17-server-pem-agent` | PEM monitoring agent | **Monitoring** |
+
+---
+
+## What Each Extension Does
+
+### Performance & Monitoring
+| Extension | What It Does |
+|-----------|-------------|
+| `edb_wait_states` | Captures wait events, session states, query performance data |
+| `pg_stat_statements` | Tracks execution stats of all SQL statements |
+| `auto_explain` | Automatically logs execution plans for slow queries |
+| `pg_buffercache` | Inspect shared buffer cache contents |
+| `pg_freespacemap` | Inspect free space map |
+| `indexadvisor` | Recommends indexes to improve query performance |
+| `sqlprofiler` | Profiles SQL execution |
+
+### Security
+| Extension | What It Does |
+|-----------|-------------|
+| `pgaudit` | Detailed audit logging of database activities |
+| `sqlprotect` | Protects against SQL injection attacks |
+| `sslutils` | Manage SSL certificates within the database |
+
+### Maintenance & Automation
+| Extension | What It Does |
+|-----------|-------------|
+| `pg_cron` | Schedule and run periodic jobs inside the database |
+| `pg_repack` | Reorganize tables online without locking (like `VACUUM FULL` but online) |
+
+### High Availability
+| Extension/Tool | What It Does |
+|----------------|-------------|
+| `efm` | Automatic failover manager |
+| `pgpool` | Connection pooling, load balancing, failover |
+
+### Reporting & Diagnostics
+| Tool | What It Does |
+|------|-------------|
+| `edb-pwr` | Generates performance workload reports from `edb_wait_states` and `pg_stat_statements` data |
+| `edb-lasso` | Collects diagnostic data for EDB support cases |
+
+---
+
+## Post-Installation Configuration
+
+### 1. Initialize and Start EPAS 17
+
+```bash
+# Initialize the database cluster (if not already done)
+sudo /usr/edb/as17/bin/edb-as-17-setup initdb
+
+# Enable and start the service
+sudo systemctl enable edb-as-17
+sudo systemctl start edb-as-17
+```
+
+### 2. Configure `shared_preload_libraries`
+
+Edit `/var/lib/edb/as17/data/postgresql.conf`:
+
+```ini
+shared_preload_libraries = 'edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain, pg_repack'
+```
+
+### 3. Configure Extension-Specific Parameters
+
+```ini
+# pg_stat_statements
+pg_stat_statements.max = 10000
+pg_stat_statements.track = all
+pg_stat_statements.track_planning = on
+
+# pgaudit
+pgaudit.log = 'write, ddl'
+pgaudit.log_parameter = on
+pgaudit.log_relation = on
+
+# auto_explain
+auto_explain.log_min_duration = '5s'
+auto_explain.log_analyze = on
+auto_explain.log_buffers = on
+auto_explain.log_timing = on
+auto_explain.log_nested_statements = on
+
+# pg_cron
+cron.database_name = 'edb'
+
+# edb_wait_states
+edb_wait_states.sampling_interval = 1
+edb_wait_states.retention_period = 604800
+edb_wait_states.enable_collection = true
+```
+
+### 4. Restart EPAS
+
+```bash
+sudo systemctl restart edb-as-17
+```
+
+### 5. Create Extensions in Database
+
+```sql
+\c edb
+
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pgaudit;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_repack;
+CREATE EXTENSION IF NOT EXISTS pg_buffercache;
+CREATE EXTENSION IF NOT EXISTS pg_freespacemap;
+CREATE EXTENSION IF NOT EXISTS sslutils;
+CREATE EXTENSION IF NOT EXISTS indexadvisor;
+CREATE EXTENSION IF NOT EXISTS sqlprofiler;
+CREATE EXTENSION IF NOT EXISTS sqlprotect;
+```
+
+> **Note:** `auto_explain` and `edb_wait_states` do **not** require `CREATE EXTENSION` — they work at the server level via `shared_preload_libraries`.
+
+---
+
+## Quick Verification Script
+
+```bash
+#!/bin/bash
+
+echo "=== EPAS 17 Service Status ==="
+sudo systemctl status edb-as-17 --no-pager
+
+echo ""
+echo "=== Installed Packages ==="
+rpm -qa | grep -E 'edb-as17|edb-pwr|edb-lasso' | sort
+
+echo ""
+echo "=== Shared Preload Libraries ==="
+sudo -u enterprisedb psql -d edb -c "SHOW shared_preload_libraries;"
+
+echo ""
+echo "=== Installed Extensions ==="
+sudo -u enterprisedb psql -d edb -c "\dx"
+
+echo ""
+echo "=== pg_stat_statements Status ==="
+sudo -u enterprisedb psql -d edb -c "SELECT count(*) FROM pg_stat_statements;"
+
+echo ""
+echo "=== edb_wait_states Status ==="
+sudo -u enterprisedb psql -d edb -c "SELECT count(*) FROM edb_wait_states_data();"
+
+echo ""
+echo "=== pg_cron Jobs ==="
+sudo -u enterprisedb psql -d edb -c "SELECT * FROM cron.job;"
+
+echo ""
+echo "=== pgaudit Settings ==="
+sudo -u enterprisedb psql -d edb -c "SHOW pgaudit.log;"
+```
+
+---
+
+## Summary Table
+
+| Need | Install |
+|------|---------|
+| **Core server** | `edb-as17-server` |
+| **Performance monitoring** | `edb-as17-server-edb_wait_states`, `edb-as17-server-contrib` |
+| **Audit logging** | `edb-as17-server-pgaudit` |
+| **Job scheduling** | `edb-as17-server-pg_cron` |
+| **Online table maintenance** | `edb-as17-server-pg_repack` |
+| **Performance reports** | `edb-pwr` |
+| **Support diagnostics** | `edb-lasso` |
+| **High availability** | `edb-as17-server-efm`, `edb-as17-server-pgpool` |
+| **Monitoring integration** | `edb-as17-server-pem-agent` |
+| **Development tools** | `edb-as17-server-pldebugger`, `edb-as17-server-plpython3` |
+| **Security** | `edb-as17-server-sqlprotect`, `edb-as17-server-sslutils` |
+
+This setup gives you a **production-ready EPAS 17** with comprehensive monitoring, auditing, automation, and maintenance capabilities.
