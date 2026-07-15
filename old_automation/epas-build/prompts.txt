@@ -1,0 +1,12 @@
+Write a bash script for patching EDB Postgres Advanced Server (EPAS) clusters. Requirements:
+Interactive menu to select EPAS version 14–17
+Environment-aware defaults: read PGHOME and PGDATA from shell environment variables if set; otherwise fall back to /usr/edb/as<version> and /u00/data/as<version>
+No eval — use safe variable assignment (printf -v)
+Signal handling at the top: INT, TERM, HUP
+Concurrency lock via flock to prevent simultaneous runs
+Absolute path validation for PGHOME and PGDATA
+5-step workflow: stop DB → OS package upgrade (with manual/auto options) → restart → run edb_sqlpatch -af → verify process and connectivity
+Color-coded output with confirmation prompts at each critical step
+Logging with timestamps to ./logs/
+Error tracking — increment an errors counter on restart failure and patch failure, report at the end
+Use set -euo pipefail, $USER instead of whoami, and df -B1G for disk space

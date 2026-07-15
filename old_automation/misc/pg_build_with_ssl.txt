@@ -1,0 +1,156 @@
+#!/bin/bash
+# ==============================================================================
+# CONSOLIDATED EPAS 17 DEPLOYMENT & HARDENING SCRIPT
+# Architecture: Modular configuration using include_dir 'conf.d'
+# ==============================================================================
+set -e
+
+# --- Configuration Variables ---
+PRIMARY_HOST="Primary.com"
+PRIMARY_PORT="5444"
+BINARY_TOP="/u001/binary/as17"   # Your custom binary target path
+DATA_TOP="/u001/data/as17"       # Your custom PGDATA target path
+SECURITY_TOP="/u001/security"
+SERVICE_NAME="edb-as-17"
+SYSTEM_USER="enterprisedb"
+SRC_BINARY_DIR="/usr/edb/as17"
+
+echo "=== [START] EPAS 17 Enterprise Build Infrastructure ==="
+
+# ==============================================================================
+# PHASE 1: REPOSITORY INSTALLATION & SYSTEMD SETUP
+# ==============================================================================
+echo "--- [Phase 1] Installing EPAS 17 Packages ---"
+if ! dnf list installed edb-as17-server &>/dev/null; then
+    dnf install -y edb-as17-server
+else
+    echo "Packages already installed. Skipping dnf step."
+fi
+
+echo "--- [Phase 1] Creating Custom Systemd Service Unit ---"
+SOURCE_SERVICE="/usr/lib/systemd/system/edb-as-17.service"
+TARGET_SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+if [ -f "$SOURCE_SERVICE" ]; then
+    cp "$SOURCE_SERVICE" "$TARGET_SERVICE"
+    echo "Systemd unit file placed at ${TARGET_SERVICE}"
+else
+    echo "[ERROR] Source service file $SOURCE_SERVICE not found."
+    exit 1
+fi
+
+# ==============================================================================
+# PHASE 2: LAYOUT MANAGEMENT, CRYPTO SETUP & INITDB
+# ==============================================================================
+echo "--- [Phase 2] Preparing Enterprise Layout Directories ---"
+mkdir -p "$BINARY_TOP" "$DATA_TOP" "$SECURITY_TOP" "${DATA_TOP}/conf.d"
+chown -R "${SYSTEM_USER}:${SYSTEM_USER}" "$BINARY_TOP" "$DATA_TOP" "$SECURITY_TOP"
+
+echo "--- [Phase 2] Relocating EPAS 17 Binaries to $BINARY_TOP ---"
+if [ -d "$SRC_BINARY_DIR" ]; then
+    cp -a "$SRC_BINARY_DIR"/. "$BINARY_TOP/"
+    chown -R "${SYSTEM_USER}:${SYSTEM_USER}" "$BINARY_TOP"
+else
+    echo "[ERROR] Source directory $SRC_BINARY_DIR missing."
+    exit 1
+    
+fi
+
+echo "--- [Phase 2] Generating Secure SSL Toolkit inside $SECURITY_TOP ---"
+cd "$SECURITY_TOP"
+
+# Auto-generate a dummy passphrase file if it doesn't already exist
+if [ ! -f .passphrase ]; then
+    echo "DBAdminSecretPassphrase123!" > .passphrase
+    echo "[WARNING] Generated placeholder passphrase file at .passphrase. Update this file as needed."
+fi
+
+# Create the passphrase wrapper shell script
+cat << 'EOF' > get_pin.sh
+#!/bin/bash
+cat /u001/security/.passphrase
+EOF
+
+# Generate Crypto Keys (Root CA -> Server Cert Pair) using Passphrase
+PASSPHRASE_STR=$(cat .passphrase)
+
+# Root Key & Cert
+openssl genrsa -out root.key 4096
+openssl req -x509 -new -nodes -key root.key -sha256 -days 3650 \
+  -subj "/C=US/ST=State/L=City/O=Enterprise/CN=CustomRootCA" -out root.crt
+
+# Password-Protected Server Key
+openssl genrsa -aes256 -passout pass:"$PASSPHRASE_STR" -out server.key 2048
+
+# Certificate Signing Request
+openssl req -new -key server.key -passin pass:"$PASSPHRASE_STR" \
+  -subj "/C=US/ST=State/L=City/O=Enterprise/CN=${PRIMARY_HOST}" -out server.csr
+
+# Sign Server Certificate
+openssl x509 -req -in server.csr -CA root.crt -CAkey root.key \
+  -CAcreateserial -out server.crt -days 730 -sha256 -passin pass:"$PASSPHRASE_STR"
+
+# Clean artifacts
+rm -f server.csr root.srl
+
+# Hardening file storage scopes for DB engine consumption
+chmod 0400 .passphrase
+chmod 0500 get_pin.sh
+chmod 0644 root.crt server.crt
+chmod 0600 root.key server.key
+chown -R "${SYSTEM_USER}:${SYSTEM_USER}" "$SECURITY_TOP"
+
+cd - > /dev/null
+
+echo "--- [Phase 2] Initializing Clean Database Cluster Core ---"
+if [ -z "$(ls -A "$DATA_TOP" | grep -v 'conf.d')" ]; then
+    su - "$SYSTEM_USER" -c "${BINARY_TOP}/bin/initdb -D ${DATA_TOP}"
+else
+    echo "Data directory is already initialized. Skipping initdb."
+fi
+
+# ==============================================================================
+# CONFIGURATION INJECTION: include_dir DESIGN PATTERN
+# ==============================================================================
+echo "--- [Phase 2] Linking Architecture to conf.d Structure ---"
+PG_CONF="${DATA_TOP}/postgresql.conf"
+CUSTOM_SSL_CONF="${DATA_TOP}/conf.d/ssl.conf"
+
+# 1. Append include_dir parameter to primary engine config file if not already present
+if ! grep -q "include_dir = 'conf.d'" "$PG_CONF"; then
+    cat << EOF >> "$PG_CONF"
+
+#------------------------------------------------------------------------------
+# MODULAR CONFIGURATION EXTRACTIONS
+#------------------------------------------------------------------------------
+include_dir = 'conf.d'
+EOF
+fi
+
+# 2. Write out isolated production SSL parameters into custom drop-in file
+cat << EOF > "$CUSTOM_SSL_CONF"
+# ==============================================================================
+# PRODUCTION SSL ENGINE MODULE - AUTOMATED BUILD
+# ==============================================================================
+port = ${PRIMARY_PORT}
+ssl = on
+ssl_ca_file = '${SECURITY_TOP}/root.crt'
+ssl_cert_file = '${SECURITY_TOP}/server.crt'
+ssl_key_file = '${SECURITY_TOP}/server.key'
+ssl_passphrase_command = '${SECURITY_TOP}/get_pin.sh'
+EOF
+
+chown "${SYSTEM_USER}:${SYSTEM_USER}" "$CUSTOM_SSL_CONF"
+chmod 0600 "$CUSTOM_SSL_CONF"
+
+# 3. Update Custom Systemd Service Unit Environment & Binary Paths
+echo "--- [Phase 2] Customizing systemd configuration at $TARGET_SERVICE ---"
+sed -i "s|^Environment=PGDATA=.*|Environment=PGDATA=${DATA_TOP}|" "$TARGET_SERVICE"
+sed -i "s|^ExecStart=.*|ExecStart=${BINARY_TOP}/bin/pg_ctl start -D \${PGDATA} -s -w -t \${PGSTARTTIMEOUT}|" "$TARGET_SERVICE"
+sed -i "s|^ExecStop=.*|ExecStop=${BINARY_TOP}/bin/pg_ctl stop -D \${PGDATA} -s -m fast|" "$TARGET_SERVICE"
+sed -i "s|^ExecReload=.*|ExecReload=${BINARY_TOP}/bin/pg_ctl reload -D \${PGDATA} -s|" "$TARGET_SERVICE"
+
+systemctl daemon-reload
+
+echo "=== [SUCCESS] EPAS 17 Architecture and Automated SSL Build Complete ==="
+echo "You can now safely start your engine using: systemctl start ${SERVICE_NAME}"

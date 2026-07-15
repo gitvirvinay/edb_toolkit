@@ -1,0 +1,11 @@
+# ==============================================================================
+# HARDENED SSL HBA ENTRIES
+# ==============================================================================
+# Local engine maintenance loopbacks
+local   all             all                                     scram-sha-256
+
+# Reject non-encrypted host attempts, enforce SCRAM for network traffic
+hostssl all             all             ${SUBNET_CIDR}          scram-sha-256
+
+# Streaming Replication SSL Restrictions
+hostssl replication     replicator      ${STANDBY_HOST}/32       scram-sha-256

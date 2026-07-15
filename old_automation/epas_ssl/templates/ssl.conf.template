@@ -1,0 +1,17 @@
+# ==============================================================================
+# PRODUCTION SSL ENGINE MODULE - DROP-IN CONFIGURATION
+# ==============================================================================
+ssl = on
+ssl_ca_file = '${SECURITY_TOP}/root.crt'
+ssl_cert_file = '${SECURITY_TOP}/server_chained.crt'
+ssl_key_file = '${SECURITY_TOP}/server.key'
+# Enforce the server's secure cipher preferences over the client's preferences
+ssl_prefer_server_ciphers = on
+# Optional:Restrict to secure, high-strength ciphers (Blocks 3DES, RC4, MD5, and low/medium suites)
+ssl_ciphers = 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256'
+
+# Optional: Force the database to use TLS 1.2 minimum (Recommended)
+ssl_min_protocol_version = 'TLSv1.2'
+
+# Injected dynamically if a passphrase exists
+${PASSPHRASE_LINE}
