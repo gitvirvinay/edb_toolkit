@@ -12,22 +12,31 @@ if [ -z "${1:-}" ] || [ ! -f "$1" ]; then
 fi
 source "$1"
 
-# Ensure variables with no safe default are bound
+# Ensure variables with no safe default are bound (avoids 'set -u' crash)
 : "${SYSTEM_USER:?SYSTEM_USER variable is unset}"
-: "${SYSTEM_GROUP:?SYSTEM_GROUP variable is unset}"
 : "${PRIMARY_PORT:?PRIMARY_PORT variable is unset}"
 : "${REP_USER:?REP_USER variable is unset}"
 : "${SUBNET_CIDR:?SUBNET_CIDR variable is unset}"
 : "${DATA_TOP:?DATA_TOP variable is unset}"
 : "${BINARY_TOP:?BINARY_TOP variable is unset}"
 
-log_info "START: Preparing Primary Node for Standby Replication Setup"
+# ==========================================
+# SAFEGUARDS & USER VALIDATION
+# ==========================================
+CURRENT_USER=$(whoami)
+if [ "$CURRENT_USER" != "$SYSTEM_USER" ]; then
+    log_error "This script must be run directly as the system user: '${SYSTEM_USER}' (Current user: '${CURRENT_USER}')."
+    log_error "Please switch user: 'sudo su - ${SYSTEM_USER}' and execute again."
+    exit 1
+fi
+
+log_info "START: Preparing Primary Node (Running as database user: ${SYSTEM_USER})"
 
 # ==========================================
 # 1. CREATE REPLICATION USER & SECURE PASS
 # ==========================================
-# Check if the replication user already exists
-USER_EXISTS=$(sudo -u "$SYSTEM_USER" "${BINARY_TOP}/bin/psql" -p "${PRIMARY_PORT}" -d postgres \
+# Check if replication user already exists using local socket authentication
+USER_EXISTS=$("${BINARY_TOP}/bin/psql" -p "${PRIMARY_PORT}" -d postgres \
     -tAc "SELECT 1 FROM pg_roles WHERE rolname='${REP_USER}';" 2>/dev/null || echo "0")
 
 if [ "$USER_EXISTS" != "1" ]; then
@@ -35,21 +44,17 @@ if [ "$USER_EXISTS" != "1" ]; then
     REP_PASSWORD=$(openssl rand -base64 18)
     log_info "Creating replication user '${REP_USER}' with secure password..."
     
-    sudo -u "$SYSTEM_USER" "${BINARY_TOP}/bin/psql" -p "${PRIMARY_PORT}" -d postgres \
+    "${BINARY_TOP}/bin/psql" -p "${PRIMARY_PORT}" -d postgres \
         -c "CREATE ROLE ${REP_USER} WITH REPLICATION LOGIN PASSWORD '${REP_PASSWORD}';" > /dev/null
     
-    # Store replication credentials securely in the SYSTEM_USER's .pgpass file
-    # This allows pg_basebackup and psql connections to authenticate seamlessly.
-    USER_HOME=$(eval echo "~${SYSTEM_USER}")
-    PGPASS_FILE="${USER_HOME}/.pgpass"
-    
+    # Locate active user's home directory
+    PGPASS_FILE="${HOME}/.pgpass"
     log_info "Staging replication credentials in ${PGPASS_FILE}..."
-    sudo -u "$SYSTEM_USER" touch "$PGPASS_FILE"
-    sudo -u "$SYSTEM_USER" chmod 0600 "$PGPASS_FILE"
     
+    # Securely append credentials directly into user's .pgpass
     # Format: hostname:port:database:username:password
-    # Staging both local connections and IP-bound connections
-    echo "*:${PRIMARY_PORT}:*:${REP_USER}:${REP_PASSWORD}" | sudo -u "$SYSTEM_USER" tee -a "$PGPASS_FILE" > /dev/null
+    echo "*:${PRIMARY_PORT}:*:${REP_USER}:${REP_PASSWORD}" >> "$PGPASS_FILE"
+    chmod 0600 "$PGPASS_FILE"
 else
     log_warn "Replication user '${REP_USER}' already exists. Skipping role creation."
 fi
@@ -66,19 +71,21 @@ fi
 
 log_info "Validating pg_hba.conf configuration rules..."
 
-# Prepare the replication network rule entries
 RULE_REPLICATION="host    replication     ${REP_USER}     ${SUBNET_CIDR}          scram-sha-256"
 RULE_DB_ACCESS="host    postgres        ${REP_USER}     ${SUBNET_CIDR}          scram-sha-256"
 
-# Check and inject the replication connection rule
+# Check and inject rules securely
 if ! grep -Fxq "$RULE_REPLICATION" "$HBA_CONF"; then
-    log_info "Injecting replication network access rule into pg_hba.conf..."
-    # Insert before local connections/catch-alls by prepending to the top of the file
+    log_info "Injecting replication network access rules into pg_hba.conf..."
+    
+    # Since we are already running as the owner, we can directly rewrite the file without sudo
     TEMP_HBA=$(mktemp)
-    echo -e "# Replication network rule added dynamically\n${RULE_REPLICATION}\n${RULE_DB_ACCESS}" > "$TEMP_HBA"
+    echo -e "# Replication network rules added dynamically\n${RULE_REPLICATION}\n${RULE_DB_ACCESS}" > "$TEMP_HBA"
     cat "$HBA_CONF" >> "$TEMP_HBA"
-    sudo -u "$SYSTEM_USER" cp "$TEMP_HBA" "$HBA_CONF"
-    rm -f "$TEMP_HBA"
+    mv "$TEMP_HBA" "$HBA_CONF"
+    
+    # Ensure standard database permission flags remain intact
+    chmod 0600 "$HBA_CONF"
 else
     log_info "pg_hba.conf replication rule already exists."
 fi
@@ -86,7 +93,7 @@ fi
 # ==========================================
 # 3. RELOAD CONFIGURATION
 # ==========================================
-log_info "Reloading EPAS configuration to apply modifications..."
-sudo -u "$SYSTEM_USER" "${BINARY_TOP}/bin/pg_ctl" -D "$DATA_TOP" reload
+log_info "Reloading EPAS configuration dynamically..."
+"${BINARY_TOP}/bin/pg_ctl" -D "$DATA_TOP" reload
 
 log_info "SUCCESS: Primary node is prepared. Ready to initiate replication stream."
