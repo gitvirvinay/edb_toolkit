@@ -152,7 +152,7 @@ log_info "Pre-staging database performance & port parameters to conf.d/"
 cat << EXT_CONF_EOF | sudo -u "$SYSTEM_USER" tee "${DATA_TOP}/conf.d/00_custom_perf.conf" > /dev/null
 
 # Connectivity Configuration
-port = 5444
+port = ${PRIMARY_PORT}
 
 # Consolidated Performance, Compatibility, & Audit Framework Tracking
 shared_preload_libraries = '$libdir/dbms_pipe, $libdir/edb_gen, $libdir/dbms_aq, edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain'
