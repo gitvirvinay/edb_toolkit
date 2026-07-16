@@ -76,7 +76,7 @@ fi
 # ==========================================
 # BINARY ROTATION & DIRECTORY SETUP
 # ==========================================
-sudo mkdir -p "$BINARY_TOP" "$DATA_TOP" "${DATA_TOP}/conf.d"
+sudo mkdir -p "$BINARY_TOP" "$DATA_TOP"
 
 if [ -d "$SRC_BINARY_DIR" ]; then
     if [ -d "$BINARY_TOP/bin" ]; then
@@ -130,6 +130,10 @@ if [ ! -f "${DATA_TOP}/PG_VERSION" ]; then
     # Execute initdb switched to the target system user
     sudo -u "$SYSTEM_USER" -E "${BINARY_TOP}/bin/initdb" -D "$DATA_TOP" -E UTF8 --data-encryption=256
 fi
+
+sudo mkdir -p "${DATA_TOP}/conf.d"
+log_info "Configuring directory ownership to ${SYSTEM_USER}:${SYSTEM_GROUP}"
+sudo chown -R "${SYSTEM_USER}:${SYSTEM_GROUP}" "$DATA_TOP"
 
 # ==========================================
 # CONFIGURATION INJECTION
