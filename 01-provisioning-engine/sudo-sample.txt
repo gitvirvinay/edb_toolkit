@@ -1,0 +1,24 @@
+# /etc/sudoers.d/90-db-deployer
+
+
+
+# Define Alias for system tasks required by EPAS automation
+Cmnd_Alias EPAS_SYS_CMDS = /usr/bin/dnf list installed edb-as*, \
+                           /usr/bin/dnf install -y edb-as*, \
+                           /usr/bin/dnf install -y edb-pwr edb-lasso, \
+                           /usr/bin/mkdir -p /u001/binary/as17*, \
+                           /usr/bin/mkdir -p /u001/data/as17*, \
+                           /usr/bin/mkdir -p /etc/systemd/system/edb-as-17.service.d*, \
+                           /usr/bin/chown -R enterprisedb\:enterprisedb /u001/binary/as17*, \
+                           /usr/bin/chown -R enterprisedb\:enterprisedb /u001/data/as17*, \
+                           /usr/bin/tee /etc/systemd/system/edb-as-17.service.d/override.conf, \
+                           /usr/bin/systemctl daemon-reload, \
+                           /usr/bin/systemctl stop edb-as-17, \
+                           /usr/bin/systemctl start edb-as-17, \
+                           /usr/bin/systemctl status edb-as-17 --no-pager, \
+                           /usr/bin/mkdir -p /var/log/edb-toolkit*, \
+                           /usr/bin/touch /var/log/edb-toolkit/deploy.log, \
+                           /usr/bin/chmod 666 /var/log/edb-toolkit/deploy.log
+
+# Grant enterprisedb passwordless privilege escalation for these specific commands
+enterprisedb ALL=(root) NOPASSWD: EPAS_SYS_CMDS

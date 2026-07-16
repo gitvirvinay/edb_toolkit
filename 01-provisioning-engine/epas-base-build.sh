@@ -12,36 +12,112 @@ if [ -z "${1:-}" ] || [ ! -f "$1" ]; then
 fi
 source "$1"
 
+# ==========================================
+# SAFEGUARDS & VALIDATION
+# ==========================================
+# Optional: Root Privileges Check (Commented out to support sudo-whitelisted execution)
+# if [[ $EUID -ne 0 ]]; then
+#    log_error "This script must be run as root (or with sudo privileges)."
+#    exit 1
+# fi
+
 # Validate critical variables
 [[ "$EPAS_VERSION" =~ ^[0-9]+$ ]] || { log_error "EPAS_VERSION must be numeric"; exit 1; }
 [[ "$SERVICE_NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "Invalid SERVICE_NAME"; exit 1; }
 
+# Ensure variables with no safe default are bound (avoids 'set -u' crash)
+: "${SYSTEM_USER:?SYSTEM_USER variable is unset}"
+: "${SYSTEM_GROUP:?SYSTEM_GROUP variable is unset}"
+: "${PRIMARY_PORT:?PRIMARY_PORT variable is unset}"
+
 log_info "START: EPAS ${EPAS_VERSION} Enterprise Build Infrastructure"
 PACKAGE_NAME="edb-as${EPAS_VERSION}-server"
 
-if ! dnf list installed "$PACKAGE_NAME" &>/dev/null; then
-    log_info "Installing $PACKAGE_NAME and extension packages via DNF"
-    dnf install -y "$PACKAGE_NAME" edb-pwr edb-lasso "pgaudit${EPAS_VERSION}" "pg_repack${EPAS_VERSION}" "pg_cron${EPAS_VERSION}"
+# ==========================================
+# PACKAGE INSTALLATION (RESILIENT LOOP)
+# ==========================================
+# Define target packages and extensions
+PACKAGES=(
+    "$PACKAGE_NAME"
+    "${PACKAGE_NAME}-edb_wait_states"
+    "${PACKAGE_NAME}-pgaudit"
+    "${PACKAGE_NAME}-pg_cron"
+    "${PACKAGE_NAME}-pg_repack"
+    "edb-pwr"
+    "edb-lasso"
+    "${PACKAGE_NAME}-contrib"
+    "${PACKAGE_NAME}-pldebugger"
+    "${PACKAGE_NAME}-plpython3"
+    "${PACKAGE_NAME}-plperl"
+    "${PACKAGE_NAME}-pltcl"
+    "${PACKAGE_NAME}-sslutils"
+    "${PACKAGE_NAME}-indexadvisor"
+    "${PACKAGE_NAME}-sqlprofiler"
+    "${PACKAGE_NAME}-sqlprotect"
+)
+
+log_info "Evaluating and installing EPAS system packages..."
+FAILED_PACKAGES=()
+
+for pkg in "${PACKAGES[@]}"; do
+    if ! sudo dnf list installed "$pkg" &>/dev/null; then
+        log_info "Installing package: $pkg"
+        if ! sudo dnf install -y "$pkg"; then
+            log_warn "Could not install $pkg. Skipping..."
+            FAILED_PACKAGES+=("$pkg")
+        fi
+    fi
+done
+
+if [ ${#FAILED_PACKAGES[@]} -ne 0 ]; then
+    log_warn "Warning: The following packages could not be installed: ${FAILED_PACKAGES[*]}"
 fi
 
-mkdir -p "$BINARY_TOP" "$DATA_TOP" "${DATA_TOP}/conf.d"
+# ==========================================
+# BINARY ROTATION & DIRECTORY SETUP
+# ==========================================
+sudo mkdir -p "$BINARY_TOP" "$DATA_TOP" "${DATA_TOP}/conf.d"
+
 if [ -d "$SRC_BINARY_DIR" ]; then
     if [ -d "$BINARY_TOP/bin" ]; then
         BACKUP_BIN="${BINARY_TOP}_bak_$(date +%F_%H%M%S)"
         log_warn "Existing binaries found. Rotating to ${BACKUP_BIN}"
-        mv "$BINARY_TOP" "$BACKUP_BIN"
-        mkdir -p "$BINARY_TOP"
+        sudo mv "$BINARY_TOP" "$BACKUP_BIN"
+        sudo mkdir -p "$BINARY_TOP"
     fi
-    cp -r "${SRC_BINARY_DIR}/." "$BINARY_TOP/"
+    sudo cp -r "${SRC_BINARY_DIR}/." "$BINARY_TOP/"
 fi
 
-TARGET_SERVICE="/usr/lib/systemd/system/${SERVICE_NAME}.service"
-if [ -f "$TARGET_SERVICE" ]; then
-    log_info "Customizing Systemd Unit Overrides"
-    sed -i "s|^Environment=PGDATA=.*|Environment=PGDATA=${DATA_TOP}|" "$TARGET_SERVICE"
-    sed -i "s|^ExecStart=.*|ExecStart=${BINARY_TOP}/bin/pg_ctl start -D \${PGDATA} -s -w -t 300|" "$TARGET_SERVICE"
+# ==========================================
+# PERMISSIONS & OWNERSHIP (PLACED BEFORE INITDB)
+# ==========================================
+# Ownership must be updated before initdb so that the SYSTEM_USER has write access
+log_info "Configuring directory ownership to ${SYSTEM_USER}:${SYSTEM_GROUP}"
+sudo chown -R "${SYSTEM_USER}:${SYSTEM_GROUP}" "$BINARY_TOP" "$DATA_TOP"
+
+# ==========================================
+# SYSTEMD SERVICE CONFIGURATION (DROP-IN)
+# ==========================================
+SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/${SERVICE_NAME}.service.d"
+if [ -f "/usr/lib/systemd/system/${SERVICE_NAME}.service" ]; then
+    log_info "Creating Systemd Unit Overrides in ${SYSTEMD_OVERRIDE_DIR}/override.conf"
+    sudo mkdir -p "$SYSTEMD_OVERRIDE_DIR"
+    
+    # Securely write to root-owned systemd folder using sudo tee
+    cat << SYS_EOF | sudo tee "${SYSTEMD_OVERRIDE_DIR}/override.conf" > /dev/null
+[Service]
+User=${SYSTEM_USER}
+Group=${SYSTEM_GROUP}
+Environment=PGDATA=${DATA_TOP}
+PIDFile=${DATA_TOP}/postmaster.pid
+SYS_EOF
+
+    sudo systemctl daemon-reload
 fi
 
+# ==========================================
+# DATABASE CLUSTER INITIALIZATION
+# ==========================================
 log_info "Initializing Database Cluster with Native TDE Engine"
 if [ ! -f "${DATA_TOP}/PG_VERSION" ]; then
     if [[ "${TDE_WRAP_CMD}" == *"CHANGEME"* ]] || [[ "${TDE_UNWRAP_CMD}" == *"CHANGEME"* ]]; then
@@ -51,27 +127,48 @@ if [ ! -f "${DATA_TOP}/PG_VERSION" ]; then
     export PGDATAKEYWRAPCMD="${TDE_WRAP_CMD}"
     export PGDATAKEYUNWRAPCMD="${TDE_UNWRAP_CMD}"
 
-    sudo -u "$SYSTEM_USER" -E "${BINARY_TOP}/bin/initdb" -D "$DATA_TOP" -E UTF8 --data-encryption-algorithm=AES256
+    # Execute initdb switched to the target system user
+    sudo -u "$SYSTEM_USER" -E "${BINARY_TOP}/bin/initdb" -D "$DATA_TOP" -E UTF8 --data-encryption=256
 fi
 
+# ==========================================
+# CONFIGURATION INJECTION
+# ==========================================
 PG_CONF="${DATA_TOP}/postgresql.conf"
+
+# Append include directive securely under SYSTEM_USER ownership
 if ! grep -q "include_dir = 'conf.d'" "$PG_CONF"; then
-    cat << CONF_EOF >> "$PG_CONF"
-include_dir = 'conf.d'
-port = ${PRIMARY_PORT}
-CONF_EOF
+    echo "include_dir = 'conf.d'" | sudo -u "$SYSTEM_USER" tee -a "$PG_CONF" > /dev/null
 fi
 
 # Pre-stage Consolidated Performance & Audit Framework Tracking Overlay
-log_info "Pre-staging database performance extension parameters to conf.d/"
-cat << EXT_CONF_EOF > "${DATA_TOP}/conf.d/00_perf_extensions.conf"
+log_info "Pre-staging database performance & port parameters to conf.d/"
+cat << EXT_CONF_EOF | sudo -u "$SYSTEM_USER" tee "${DATA_TOP}/conf.d/00_custom_perf.conf" > /dev/null
+# Connectivity Configuration
+port = ${PRIMARY_PORT}
+
 # Consolidated Performance & Audit Framework Tracking
 shared_preload_libraries = 'edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain'
 
 edb_wait_states.enable = on
 edb_wait_states.retention_period = 300
 edb_wait_states.history_duration = 7
+
+# pg_stat_statements
+pg_stat_statements.track = all
+pg_stat_statements.max = 10000
+
+# pgaudit
+pgaudit.log = 'write,ddl'
+pgaudit.log_catalog = off
+
+# pg_cron
+pg_cron.database_name = 'edb'
+
+# auto_explain
+auto_explain.log_min_duration = '5s'
+auto_explain.log_analyze = on
+auto_explain.log_buffers = on
 EXT_CONF_EOF
 
-chown -R "${SYSTEM_USER}:${SYSTEM_GROUP}" "$BINARY_TOP" "$DATA_TOP"
 log_info "Day 1 Base Environment Initialized Successfully."
