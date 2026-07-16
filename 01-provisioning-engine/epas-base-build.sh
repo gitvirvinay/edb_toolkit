@@ -33,7 +33,7 @@ source "$1"
 log_info "START: EPAS ${EPAS_VERSION} Enterprise Build Infrastructure"
 PACKAGE_NAME="edb-as${EPAS_VERSION}-server"
 
-# ==========================================
+#==========================================
 # PACKAGE INSTALLATION (RESILIENT LOOP)
 # ==========================================
 # Define target packages and extensions
@@ -42,16 +42,16 @@ PACKAGES=(
     "${PACKAGE_NAME}-edb_wait_states"
     "${PACKAGE_NAME}-pgaudit"
     "${PACKAGE_NAME}-pg_cron"
-    "${PACKAGE_NAME}-pg_repack"
-    "edb-pwr"
-    "edb-lasso"
+    "edb-as${EPAS_VERSION}-pg_repack"      # Corrected pg_repack prefix
+    "edb-lasso"                            # Installed first as a dependency for PWR
+    "edb-pwr"                              # Independent global utility
     "${PACKAGE_NAME}-contrib"
     "${PACKAGE_NAME}-pldebugger"
     "${PACKAGE_NAME}-plpython3"
     "${PACKAGE_NAME}-plperl"
     "${PACKAGE_NAME}-pltcl"
     "${PACKAGE_NAME}-sslutils"
-    "${PACKAGE_NAME}-indexadvisor"
+    "${PACKAGE_NAME}-indexadvisor"         # Resolves to edb-as17-server-indexadvisor
     "${PACKAGE_NAME}-sqlprofiler"
     "${PACKAGE_NAME}-sqlprotect"
 )
@@ -154,9 +154,7 @@ port = ${PRIMARY_PORT}
 # Consolidated Performance & Audit Framework Tracking
 shared_preload_libraries = 'edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain'
 
-edb_wait_states.enable = on
-edb_wait_states.retention_period = 300
-edb_wait_states.history_duration = 7
+edb_wait_states.retention_period = 7776000 #7 Days
 
 # pg_stat_statements
 pg_stat_statements.track = all
