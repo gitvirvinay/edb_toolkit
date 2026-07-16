@@ -38,9 +38,7 @@ PACKAGE_NAME="edb-as${EPAS_VERSION}-server"
 # ==========================================
 # Define target packages and extensions
 # ==========================================
-# PACKAGE INSTALLATION (RESILIENT LOOP)
-# ==========================================
-# Define target packages and extensions
+
 PACKAGES=(
     "$PACKAGE_NAME"                                # edb-as17-server
     "${PACKAGE_NAME}-edb_wait_states"              # EDB proprietary wait states
@@ -152,11 +150,16 @@ fi
 # Pre-stage Consolidated Performance & Audit Framework Tracking Overlay
 log_info "Pre-staging database performance & port parameters to conf.d/"
 cat << EXT_CONF_EOF | sudo -u "$SYSTEM_USER" tee "${DATA_TOP}/conf.d/00_custom_perf.conf" > /dev/null
-# Connectivity Configuration
-port = ${PRIMARY_PORT}
 
-# Consolidated Performance & Audit Framework Tracking
-shared_preload_libraries = 'edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain'
+# Connectivity Configuration
+port = 5444
+
+# Consolidated Performance, Compatibility, & Audit Framework Tracking
+shared_preload_libraries = '$libdir/dbms_pipe, $libdir/edb_gen, $libdir/dbms_aq, edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain'
+
+# ==========================================
+# Extension Settings
+# ==========================================
 
 edb_wait_states.retention_period = 7776000 #7 Days
 
