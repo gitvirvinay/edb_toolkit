@@ -37,23 +37,27 @@ PACKAGE_NAME="edb-as${EPAS_VERSION}-server"
 # PACKAGE INSTALLATION (RESILIENT LOOP)
 # ==========================================
 # Define target packages and extensions
+# ==========================================
+# PACKAGE INSTALLATION (RESILIENT LOOP)
+# ==========================================
+# Define target packages and extensions
 PACKAGES=(
-    "$PACKAGE_NAME"
-    "${PACKAGE_NAME}-edb_wait_states"
-    "edb-as${EPAS_VERSION}-pgaudit"
-    "edb-as${EPAS_VERSION}-pg_cron"
-    "edb-as${EPAS_VERSION}-pg_repack"      # Corrected pg_repack prefix
-    "edb-lasso"                            # Installed first as a dependency for PWR
-    "edb-pwr"                              # Independent global utility
-    "${PACKAGE_NAME}-contrib"
-    "${PACKAGE_NAME}-pldebugger"
-    "${PACKAGE_NAME}-plpython3"
-    "${PACKAGE_NAME}-plperl"
-    "${PACKAGE_NAME}-pltcl"
-    "${PACKAGE_NAME}-sslutils"
-    "${PACKAGE_NAME}-indexadvisor"         # may not be available in 17
-    "${PACKAGE_NAME}-sqlprofiler"
-    "${PACKAGE_NAME}-sqlprotect"
+    "$PACKAGE_NAME"                                # edb-as17-server
+    "edb-as${EPAS_VERSION}-edb_wait_states"        # EDB proprietary wait states
+    "edb-pg${EPAS_VERSION}-pgaudit"                # Corrected: edb-pg17-pgaudit
+    "edb-pg${EPAS_VERSION}-pg_cron"                # Corrected: edb-pg17-pg_cron
+    "edb-pg${EPAS_VERSION}-pg_repack"              # Corrected: edb-pg17-pg_repack
+    "edb-lasso"                                    # Dependency for PWR
+    "edb-pwr"                                      # Global utility (if repo enabled)
+    "edb-as${EPAS_VERSION}-contrib"                # edb-as17-contrib
+    "edb-as${EPAS_VERSION}-pldebugger"             # edb-as17-pldebugger
+    "edb-as${EPAS_VERSION}-plpython3"              # edb-as17-plpython3
+    "edb-as${EPAS_VERSION}-plperl"                 # edb-as17-plperl
+    "edb-as${EPAS_VERSION}-pltcl"                  # edb-as17-pltcl
+    "edb-as${EPAS_VERSION}-sslutils"               # edb-as17-sslutils
+    "edb-as${EPAS_VERSION}-server-indexadvisor"    # Corrected: edb-as17-server-indexadvisor
+    "edb-as${EPAS_VERSION}-sqlprofiler"            # edb-as17-sqlprofiler
+    "edb-as${EPAS_VERSION}-sqlprotect"             # edb-as17-sqlprotect
 )
 
 log_info "Evaluating and installing EPAS system packages..."
