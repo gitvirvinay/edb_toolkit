@@ -45,7 +45,7 @@ PACKAGES=(
     "$PACKAGE_NAME"                                # edb-as17-server
     "${PACKAGE_NAME}-edb_wait_states"              # EDB proprietary wait states
     "edb-pg${EPAS_VERSION}-pgaudit*"               # Corrected: edb-pg17-pgaudit
-    "edb-pg${EPAS_VERSION}-pg_cron*"               # Corrected: edb-pg17-pg_cron
+    "edb-pg${EPAS_VERSION}-pg-cron*"               # Corrected: edb-pg17-pg_cron
     "pg_repack"              
     "edb-lasso"                                    # Dependency for PWR
     "edb-pwr"                                      # Global utility (if repo enabled)
