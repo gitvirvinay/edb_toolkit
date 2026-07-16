@@ -40,8 +40,8 @@ PACKAGE_NAME="edb-as${EPAS_VERSION}-server"
 PACKAGES=(
     "$PACKAGE_NAME"
     "${PACKAGE_NAME}-edb_wait_states"
-    "${PACKAGE_NAME}-pgaudit"
-    "${PACKAGE_NAME}-pg_cron"
+    "edb-as${EPAS_VERSION}-pgaudit"
+    "edb-as${EPAS_VERSION}-pg_cron"
     "edb-as${EPAS_VERSION}-pg_repack"      # Corrected pg_repack prefix
     "edb-lasso"                            # Installed first as a dependency for PWR
     "edb-pwr"                              # Independent global utility
@@ -51,7 +51,7 @@ PACKAGES=(
     "${PACKAGE_NAME}-plperl"
     "${PACKAGE_NAME}-pltcl"
     "${PACKAGE_NAME}-sslutils"
-    "${PACKAGE_NAME}-indexadvisor"         # Resolves to edb-as17-server-indexadvisor
+    "${PACKAGE_NAME}-indexadvisor"         # may not be available in 17
     "${PACKAGE_NAME}-sqlprofiler"
     "${PACKAGE_NAME}-sqlprotect"
 )
