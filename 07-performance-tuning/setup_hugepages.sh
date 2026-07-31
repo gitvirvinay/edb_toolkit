@@ -1,183 +1,125 @@
 #!/usr/bin/env bash
 #
-# setup_hugepages.sh - Automate Huge Pages calculation and configuration for EPAS
-# Must be executed as root (system kernel tuning required).
+# setup_hugepages_root.sh - Phase 1: OS Kernel Tuning for EPAS
+# Must be executed as root.
 #
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Attempt to load central logger if present, else fallback to standard echo
-if [ -f "${SCRIPT_DIR}/../config/logger.sh" ]; then
-    source "${SCRIPT_DIR}/../config/logger.sh"
-else
-    log_info() { echo "[INFO] $1"; }
-    log_warn() { echo "[WARN] $1"; }
-    log_error() { echo "[ERROR] $1" >&2; }
-    log_audit() { echo "[AUDIT] $1"; }
-fi
-
-# Default Fallback Values
-ENV_FILE=""
 EPAS_USER="enterprisedb"
-EPAS_SERVICE="edb-as-17"
-SYSCTL_CONF="/etc/sysctl.d/99-epas-hugepages.conf"
-LIMITS_CONF="/etc/security/limits.d/99-epas.conf"
-THP_SYSFS="/etc/tmpfiles.d/00-disable-thp.conf"  # not using /usr/lib/tmpfiles.d to priortize
-APPLY_EPAS_CONF=false
+SERVICE_NAME="edb-as-17"
+ENV_FILE=""
 
-# Parse command line flags (--env support)
+log()  { echo -e "[INFO] $*"; }
+warn() { echo -e "[WARN] $*" >&2; }
+err()  { echo -e "[ERROR] $*" >&2; exit 1; }
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --env)
             ENV_FILE="$2"
             shift 2
             ;;
-        --apply-epas-conf)
-            APPLY_EPAS_CONF=true
-            shift
+        --user)
+            EPAS_USER="$2"
+            shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--env /path/to/deploy.env] [--apply-epas-conf]"
+            echo "Usage: $0 [--env /path/to/deploy.env] [--user enterprisedb]"
             exit 0
             ;;
         *)
-            log_error "Unknown option: $1"
-            exit 1
+            err "Unknown option: $1"
             ;;
     esac
 done
 
-# Load environment configuration if provided (--env)
-if [ -n "$ENV_FILE" ]; then
-    if [ -f "$ENV_FILE" ]; then
-        log_info "Loading parameters from environment file: $ENV_FILE"
-        set -o allexport
-        source "$ENV_FILE"
-        set +o allexport
-
-        # Alias variables from deploy.env to script defaults with safe fallbacks
-        EPAS_USER="${EPAS_USER:-${SYSTEM_USER:-enterprisedb}}"
-        EPAS_SERVICE="${EPAS_SERVICE:-${SERVICE_NAME:-edb-as-17}}"
-        SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/99-epas-hugepages.conf}"
-        LIMITS_CONF="${LIMITS_CONF:-/etc/security/limits.d/99-epas.conf}"
-        THP_SYSFS="${THP_SYSFS:-/etc/tmpfiles.d/00-disable-thp.conf}"
-    else
-        log_error "Environment file '$ENV_FILE' not found."
-        exit 1
-    fi
+# Load deploy.env if provided
+if [[ -n "$ENV_FILE" ]]; then
+    [[ -f "$ENV_FILE" ]] || err "Environment file not found: $ENV_FILE"
+    set -o allexport
+    source "$ENV_FILE"
+    set +o allexport
+    EPAS_USER="${SYSTEM_USER:-$EPAS_USER}"
+    SERVICE_NAME="${SERVICE_NAME:-edb-as-17}"
 fi
 
-# Ensure script is run as root
-if [ "$EUID" -ne 0 ]; then
-    log_error "This script modifies kernel settings and must be run as root or via sudo."
-    exit 1
-fi
+[[ "$EUID" -eq 0 ]] || err "This script must be run as root."
 
-log_info "===================================================="
-log_info " Starting EPAS Huge Pages & THP Optimization"
-log_info "===================================================="
-log_info "Target User: $EPAS_USER | Target Service: $EPAS_SERVICE"
+log "===================================================="
+log " Starting EPAS Phase 1 OS Kernel Optimization"
+log "===================================================="
+log "Target User: $EPAS_USER | Service: $SERVICE_NAME"
 
-# 1. Locate Master EPAS Process
-log_info "[1/6] Locating main EPAS process..."
-MAIN_PID=$(pgrep -u "$EPAS_USER" -f "edb-postgres" | head -n 1 || true)
+# 1. Calculate Pages
+log "[1/5] Calculating HugePages from running EPAS shared memory..."
 
-if [ -z "$MAIN_PID" ]; then
-    log_error "edb-postgres process is not running for user '$EPAS_USER'."
-    log_error "EPAS must be active with configured shared_buffers to calculate memory allocation."
-    exit 1
-fi
-log_info "      Target EPAS Main PID: $MAIN_PID"
+HP_SIZE_KB=$(awk '/^Hugepagesize/ {print $2}' /proc/meminfo)
+[[ -n "$HP_SIZE_KB" && "$HP_SIZE_KB" -gt 0 ]] || err "Cannot read Hugepagesize from /proc/meminfo."
 
-# 2. Get GID of EPAS user
-log_info "[2/6] Querying $EPAS_USER user group details..."
-if ! EPAS_GID=$(id -g "$EPAS_USER"); then
-    log_error "OS User '$EPAS_USER' does not exist."
-    exit 1
-fi
-log_info "      Group ID (GID) for $EPAS_USER is: $EPAS_GID"
+SHARED_BYTES=$(ipcs -m | awk -v u="$EPAS_USER" '$3 == u {sum+=$5} END {print sum+0}')
+[[ "$SHARED_BYTES" -gt 0 ]] || err "No active shared memory for user '$EPAS_USER'. Is EPAS running?"
 
-# 3. Calculate Memory Footprint
-log_info "[3/6] Analyzing shared memory allocation..."
-SHARED_KB=$(pmap "$MAIN_PID" | awk '/rw-s/ && /zero/ {print $2}' | sed 's/K//' | awk '{sum+=$1} END {print sum}')
+SHARED_KB=$(( SHARED_BYTES / 1024 ))
+RAW_PAGES=$(( (SHARED_KB + HP_SIZE_KB - 1) / HP_SIZE_KB ))
+TARGET_PAGES=$(( RAW_PAGES + (RAW_PAGES / 10) + 20 ))
 
-if [ -z "$SHARED_KB" ] || [ "$SHARED_KB" -eq 0 ]; then
-    log_warn "Could not isolate anonymous shared memory using pmap. Attempting IPCS fallback..."
-    SHARED_KB=$(ipcs -m | awk -v user="$EPAS_USER" '$3 == user {print $5/1024}' | awk '{sum+=$1} END {print sum}')
-fi
+EPAS_GID=$(id -g "$EPAS_USER" 2>/dev/null) || err "OS user '$EPAS_USER' does not exist."
+log "      Shared Memory: ${SHARED_KB} KB | Page Size: ${HP_SIZE_KB} KB"
+log "      Target Pages:  $TARGET_PAGES | EPAS GID: $EPAS_GID"
 
-if [ -z "$SHARED_KB" ] || [ "$SHARED_KB" -eq 0 ]; then
-    log_error "Failed to calculate EPAS shared memory footprint."
-    exit 1
-fi
-
-HP_SIZE_KB=$(grep ^Hugepagesize /proc/meminfo | awk '{print $2}')
-log_info "      Detected OS HugePage size: ${HP_SIZE_KB} kB"
-log_info "      Target EPAS Shared Memory requirement: ${SHARED_KB} kB"
-
-# Calculate pages, rounding up, and adding a 10-page safety buffer
-TARGET_PAGES=$(( (SHARED_KB / HP_SIZE_KB) + 1 + 10 ))
-log_info "      Calculated target Huge Pages: $TARGET_PAGES"
-
-# 4. Write OS Kernel Configurations
-log_info "[4/6] Applying Kernel settings..."
+# 2. Kernel Parameters
+SYSCTL_CONF="/etc/sysctl.d/99-${SERVICE_NAME}-hugepages.conf"
+log "[2/5] Writing $SYSCTL_CONF..."
 cat << EOF > "$SYSCTL_CONF"
-# Auto-generated by setup_hugepages.sh
+# Auto-generated by setup_hugepages_root.sh
 vm.nr_hugepages = $TARGET_PAGES
 vm.hugetlb_shm_group = $EPAS_GID
 EOF
 sysctl -p "$SYSCTL_CONF" >/dev/null
-log_info "      Applied kernel parameters via $SYSCTL_CONF"
 
-# 5. Set Shell Limits (POSIX Memlock)
-log_info "[5/6] Writing security limits..."
+# 3. Shell Limits
+LIMITS_CONF="/etc/security/limits.d/99-${SERVICE_NAME}-memlock.conf"
+log "[3/5] Writing $LIMITS_CONF..."
 cat << EOF > "$LIMITS_CONF"
-# Auto-generated by setup_hugepages.sh
+# Auto-generated by setup_hugepages_root.sh
 $EPAS_USER soft memlock unlimited
 $EPAS_USER hard memlock unlimited
 EOF
-log_info "      Configured unrestricted memlock in $LIMITS_CONF"
 
-# 6. Disable Transparent Huge Pages (THP)
-log_info "[6/6] Disabling Transparent Huge Pages (THP)..."
-
-# Apply dynamically in sysfs
-if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
-    echo never > /sys/kernel/mm/transparent_hugepage/enabled || true
-fi
-if [ -f /sys/kernel/mm/transparent_hugepage/defrag ]; then
-    echo never > /sys/kernel/mm/transparent_hugepage/defrag || true
-fi
-
-# Persist across reboots using systemd tmpfiles.d
-cat << EOF > "$THP_SYSFS"
-# Auto-generated by setup_hugepages.sh
-w /sys/kernel/mm/transparent_hugepage/enabled - - - - never
-w /sys/kernel/mm/transparent_hugepage/defrag - - - - never
+# 4. Disable THP
+log "[4/5] Disabling Transparent Huge Pages..."
+if command -v tuned-adm &>/dev/null; then
+    mkdir -p /etc/tuned/epas-no-thp
+    cat << EOF > /etc/tuned/epas-no-thp/tuned.conf
+[main]
+include=throughput-performance
+[vm]
+transparent_hugepages=never
 EOF
-log_info "      Disabled THP dynamically and persisted via $THP_SYSFS"
-
-# 7. Optional Automatic EPAS Configuration
-if [ "$APPLY_EPAS_CONF" = true ]; then
-    log_info "Enforcing huge_pages = 'on' in EPAS configuration..."
-    sudo -u "$EPAS_USER" psql -d edb -c "ALTER SYSTEM SET huge_pages = 'on';"
-    log_info "EPAS configuration updated. A service restart of $EPAS_SERVICE is required to complete."
+    tuned-adm profile epas-no-thp >/dev/null 2>&1 || warn "tuned-adm profile switch failed; using sysfs fallback."
 fi
 
-log_audit "HugePages configured ($TARGET_PAGES pages) and THP disabled for $EPAS_USER"
-
-log_info "===================================================="
-log_info " OS Configuration Complete!"
-log_info "===================================================="
-log_info "To finalize implementation:"
-if [ "$APPLY_EPAS_CONF" = false ]; then
-    log_info "1. Enforce huge pages in EPAS:"
-    log_info "   sudo -u $EPAS_USER psql -c \"ALTER SYSTEM SET huge_pages = 'on';\""
+if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
+    echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
 fi
-log_info "2. Restart the EPAS service:"
-log_info "   systemctl restart $EPAS_SERVICE"
-log_info "3. Verify pages are in use:"
-log_info "   grep Huge /proc/meminfo"
-log_info "===================================================="
+if [[ -f /sys/kernel/mm/transparent_hugepage/defrag ]]; then
+    echo never > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+fi
+
+# 5. Verification Gate
+log "[5/5] Verifying kernel allocation..."
+sleep 1
+ACTUAL_PAGES=$(awk '/^HugePages_Total/ {print $2}' /proc/meminfo)
+
+if [[ "$ACTUAL_PAGES" -lt "$TARGET_PAGES" ]]; then
+    warn "Allocated only $ACTUAL_PAGES / $TARGET_PAGES pages."
+    warn "Memory is likely fragmented. REBOOT before enabling huge_pages='on' in EPAS."
+    exit 2
+else
+    log "SUCCESS: $ACTUAL_PAGES HugePages allocated."
+fi
+
+log "===================================================="
+log " OS Phase 1 Complete. Handoff to DBA."
+log "===================================================="
