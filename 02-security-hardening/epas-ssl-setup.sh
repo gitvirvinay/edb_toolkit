@@ -46,7 +46,12 @@ chmod 0700 "$SECURITY_TOP"
 
 BACKUP_DIR="${SECURITY_TOP}/.backup-$(date +%Y%m%d%H%M%S)"
 mkdir -p "$BACKUP_DIR"
-backup() { [[ -e "$1" ]] && cp -a "$1" "$BACKUP_DIR/"; }
+
+backup() {
+    if [[ -e "$1" ]]; then
+        cp -a "$1" "$BACKUP_DIR/"
+    fi
+}
 
 # --- 5. Extract private key & enforce encryption -----------------------------
 echo "Extracting private key from bundle..."
