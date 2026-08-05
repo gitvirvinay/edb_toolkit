@@ -52,13 +52,20 @@ backup() { [[ -e "$1" ]] && cp -a "$1" "$BACKUP_DIR/"; }
 echo "Extracting private key from bundle..."
 awk '/-BEGIN .*PRIVATE KEY-/,/-END .*PRIVATE KEY-/' "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/server.key.tmp"
 
-# If openssl can read it WITHOUT a passphrase, it is unencrypted → reject
-if openssl pkey -in "${SECURITY_TOP}/server.key.tmp" -noout 2>/dev/null; then
+# Verify we actually extracted something
+if [[ ! -s "${SECURITY_TOP}/server.key.tmp" ]]; then
+    echo "FATAL: No private key found in bundle."
+    exit 1
+fi
+
+# Reliable encryption check: feed a deliberately wrong password.
+#   - Unencrypted key → openssl ignores -passin, returns 0
+#   - Encrypted key  → bad password fails, returns 1
+if openssl pkey -in "${SECURITY_TOP}/server.key.tmp" -noout -passin pass:_DUMMY_INVALID_ 2>/dev/null; then
     rm -f "${SECURITY_TOP}/server.key.tmp"
     echo "FATAL: Private key is NOT encrypted. This script requires an encrypted key."
     exit 1
 fi
-
 # --- 6. Prompt for passphrase (mandatory, non-empty, validated) --------------
 while true; do
     read -s -r -p "Enter server.key decryption passphrase: " KEY_PASS
