@@ -185,6 +185,16 @@ EOF
 chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$PG_HBA_CONF"
 chmod 0600 "$PG_HBA_CONF"
 
+# --- Ensure conf.d is included in postgresql.conf ---------------------------
+PG_CONF="${DATA_TOP}/postgresql.conf"
+
+if ! grep -qE "^include_dir\s*=\s*['\"]conf.d['\"]" "$PG_CONF" 2>/dev/null; then
+    echo "Adding include_dir to ${PG_CONF}..."
+    echo "include_dir = 'conf.d'" >> "$PG_CONF"
+    chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$PG_CONF"
+    chmod 0600 "$PG_CONF"
+fi
+
 # --- 13. Validate config & restart -------------------------------------------
 echo "Validating configuration..."
 PG_CTL=$(command -v pg_ctl 2>/dev/null || command -v pg_ctl17 2>/dev/null || true)
