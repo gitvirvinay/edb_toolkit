@@ -142,17 +142,19 @@ sudo chown -R "${SYSTEM_USER}:${SYSTEM_GROUP}" "$DATA_TOP"
 # ==========================================
 PG_CONF="${DATA_TOP}/postgresql.conf"
 
-# Append include directive securely under SYSTEM_USER ownership
-if ! grep -q "include_dir = 'conf.d'" "$PG_CONF"; then
+# Read PG_CONF securely with sudo to avoid permission denied errors
+if ! sudo -u "$SYSTEM_USER" grep -q "include_dir = 'conf.d'" "$PG_CONF"; then
     echo "include_dir = 'conf.d'" | sudo -u "$SYSTEM_USER" tee -a "$PG_CONF" > /dev/null
 fi
 
 # Pre-stage Consolidated Performance & Audit Framework Tracking Overlay
 log_info "Pre-staging database performance & port parameters to conf.d/"
-cat << EXT_CONF_EOF | sudo -u "$SYSTEM_USER" tee "${DATA_TOP}/conf.d/00_custom_perf.conf" > /dev/null
+
+# Quoting 'EXT_CONF_EOF' prevents Bash from trying to expand $libdir
+cat << 'EXT_CONF_EOF' | sudo -u "$SYSTEM_USER" tee "${DATA_TOP}/conf.d/00_custom_perf.conf" > /dev/null
 
 # Connectivity Configuration
-port = ${PRIMARY_PORT}
+port = 5444
 
 # Consolidated Performance, Compatibility, & Audit Framework Tracking
 shared_preload_libraries = '$libdir/dbms_pipe, $libdir/edb_gen, $libdir/dbms_aq, edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain'
