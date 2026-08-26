@@ -42,6 +42,8 @@ PACKAGE_NAME="edb-as${EPAS_VERSION}-server"
 PACKAGES=(
     "$PACKAGE_NAME"                                # edb-as17-server
     "${PACKAGE_NAME}-edb_wait_states"              # EDB proprietary wait states
+	"edb-as${EPAS_VERSION}-query-advisor*"
+	"edb-as${EPAS_VERSION}-stat_monitor*"
     "edb-pg${EPAS_VERSION}-pgaudit*"               # Corrected: edb-pg17-pgaudit
     "edb-pg${EPAS_VERSION}-pg-cron*"               # Corrected: edb-pg17-pg_cron
     "pg_repack"              
@@ -53,7 +55,6 @@ PACKAGES=(
     "${PACKAGE_NAME}-plperl"
     "${PACKAGE_NAME}-pltcl"
     "${PACKAGE_NAME}-sslutils"
-    "${PACKAGE_NAME}-indexadvisor"         		  # indexadvisor for as17 may not exist
     "${PACKAGE_NAME}-sqlprofiler"
     "${PACKAGE_NAME}-sqlprotect"
 )
@@ -157,7 +158,7 @@ cat << 'EXT_CONF_EOF' | sudo -u "$SYSTEM_USER" tee "${DATA_TOP}/conf.d/00_custom
 port = 5444
 
 # Consolidated Performance, Compatibility, & Audit Framework Tracking
-shared_preload_libraries = '$libdir/dbms_pipe, $libdir/edb_gen, $libdir/dbms_aq, edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain'
+shared_preload_libraries = '$libdir/dbms_pipe,$libdir/edb_gen,$libdir/dbms_aq,$libdir/sql-profiler,edb_wait_states,edb_stat_monitor,query_advisor,pg_stat_statements,pgaudit,pg_cron,auto_explain'
 
 # ==========================================
 # Extension Settings
