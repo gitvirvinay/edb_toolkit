@@ -162,6 +162,24 @@ CREATE EXTENSION IF NOT EXISTS sslutils;
 CREATE EXTENSION IF NOT EXISTS indexadvisor;
 CREATE EXTENSION IF NOT EXISTS sqlprofiler;
 CREATE EXTENSION IF NOT EXISTS sqlprotect;
+
+\c template1
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pgaudit;
+--CREATE EXTENSION IF NOT EXISTS pg_cron; --only works in one database per cluster. Install it in edb only.
+CREATE EXTENSION IF NOT EXISTS pg_repack;
+CREATE EXTENSION IF NOT EXISTS pg_buffercache;
+CREATE EXTENSION IF NOT EXISTS pg_freespacemap;
+--sslutils, sqlprofiler, indexadvisor — these are EDB admin/security tooling typically 
+--intended for the edb database (or wherever you run EDB manageability tooling)
+-- not application databases. Skip them in template1.
+--CREATE EXTENSION IF NOT EXISTS sslutils;
+--CREATE EXTENSION IF NOT EXISTS indexadvisor;
+--CREATE EXTENSION IF NOT EXISTS sqlprofiler;
+CREATE EXTENSION IF NOT EXISTS sqlprotect;  -- if you want it everywhere
+
+
+
 ```
 
 > **Note:** `auto_explain` and `edb_wait_states` do **not** require `CREATE EXTENSION` — they work at the server level via `shared_preload_libraries`.

@@ -156,6 +156,7 @@ cat << 'EXT_CONF_EOF' | sudo -u "$SYSTEM_USER" tee "${DATA_TOP}/conf.d/00_custom
 
 # Connectivity Configuration
 port = 5444
+listen_addresses='*'
 
 # Consolidated Performance, Compatibility, & Audit Framework Tracking
 shared_preload_libraries = '$libdir/dbms_pipe,$libdir/edb_gen,$libdir/dbms_aq,$libdir/sql-profiler,edb_wait_states,edb_stat_monitor,query_advisor,pg_stat_statements,pgaudit,pg_cron,auto_explain'
