@@ -15,7 +15,7 @@ sudo dnf install -y \
     edb-as17-server-plperl \
     edb-as17-server-pltcl \
     edb-as17-server-sslutils \
-    edb-as17-server-indexadvisor \
+    edb-as17-query-advisor \
     edb-as17-server-sqlprofiler \
     edb-as17-server-sqlprotect \
     edb-as17-server-efm \
@@ -109,7 +109,7 @@ sudo systemctl start edb-as-17
 Edit `/var/lib/edb/as17/data/postgresql.conf`:
 
 ```ini
-shared_preload_libraries = 'edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain, pg_repack'
+shared_preload_libraries = 'edb_wait_states, pg_stat_statements, pgaudit, pg_cron, auto_explain, pg_repack,'$libdir/query_advisor''
 ```
 
 ### 3. Configure Extension-Specific Parameters
