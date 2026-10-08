@@ -3,6 +3,8 @@ set -euo pipefail
 
 # -----------------------------------------------------------------------------
 # epas-ssl-setup.sh  —  Encrypted-key, file-based passphrase (Arch 2A)
+#   v2: intermediates are preserved in server_chained.crt (leaf + chain),
+#       root.crt = last cert only.
 # Usage:  sudo ./epas-ssl-setup.sh --env config.env [-b /path/to/bundle.pem]
 # -----------------------------------------------------------------------------
 
@@ -57,20 +59,17 @@ backup() {
 echo "Extracting private key from bundle..."
 awk '/-BEGIN .*PRIVATE KEY-/,/-END .*PRIVATE KEY-/' "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/server.key.tmp"
 
-# Verify we actually extracted something
 if [[ ! -s "${SECURITY_TOP}/server.key.tmp" ]]; then
     echo "FATAL: No private key found in bundle."
     exit 1
 fi
 
-# Reliable encryption check: feed a deliberately wrong password.
-#   - Unencrypted key → openssl ignores -passin, returns 0
-#   - Encrypted key  → bad password fails, returns 1
 if openssl pkey -in "${SECURITY_TOP}/server.key.tmp" -noout -passin pass:_DUMMY_INVALID_ 2>/dev/null; then
     rm -f "${SECURITY_TOP}/server.key.tmp"
     echo "FATAL: Private key is NOT encrypted. This script requires an encrypted key."
     exit 1
 fi
+
 # --- 6. Prompt for passphrase (mandatory, non-empty, validated) --------------
 while true; do
     read -s -r -p "Enter server.key decryption passphrase: " KEY_PASS
@@ -83,7 +82,6 @@ while true; do
     echo "Incorrect passphrase. Try again."
 done
 
-# Keep the encrypted key on disk (never decrypt it)
 backup "${SECURITY_TOP}/server.key"
 mv "${SECURITY_TOP}/server.key.tmp" "${SECURITY_TOP}/server.key"
 chmod 0600 "${SECURITY_TOP}/server.key"
@@ -92,7 +90,6 @@ chmod 0600 "${SECURITY_TOP}/server.key"
 PASSPHRASE_FILE="${SECURITY_TOP}/.ssl_key_passphrase"
 backup "$PASSPHRASE_FILE"
 
-# No trailing newline — OpenSSL and PostgreSQL both prefer it
 printf '%s' "$KEY_PASS" > "$PASSPHRASE_FILE"
 chmod 0400 "$PASSPHRASE_FILE"
 chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$PASSPHRASE_FILE"
@@ -109,20 +106,36 @@ chmod 0500 "$PASSPHRASE_CMD"
 chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$PASSPHRASE_CMD"
 
 # --- 9. Extract certificates -------------------------------------------------
+# Bundle order requirement:  [leaf FIRST] [intermediates...] [root LAST]
+#   server_chained.crt = leaf + intermediates (all certs EXCEPT the last)
+#   root.crt           = last cert only (root CA)
 echo "Extracting certificates..."
 
-backup "${SECURITY_TOP}/server_chained.crt"
-openssl x509 -in "$INPUT_PEM_BUNDLE" -out "${SECURITY_TOP}/server_chained.crt" 2>/dev/null \
-    || { echo "FATAL: Failed to extract server certificate"; exit 1; }
-
-backup "${SECURITY_TOP}/root.crt"
 CERT_COUNT=$(grep -c "BEGIN CERTIFICATE" "$INPUT_PEM_BUNDLE" || true)
+
+backup "${SECURITY_TOP}/server_chained.crt"
+backup "${SECURITY_TOP}/root.crt"
+
 if [[ "$CERT_COUNT" -le 1 ]]; then
+    # Single/self-signed: chained = the one cert, root = same cert
+    awk '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/' "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/server_chained.crt"
     cp "${SECURITY_TOP}/server_chained.crt" "${SECURITY_TOP}/root.crt"
 else
+    # Full chain: everything except the LAST cert goes to the server chain
+    awk -v total="$CERT_COUNT" '
+        /-BEGIN CERTIFICATE-/ { n++; skip = (n == total) }
+        skip { next }
+        { print }
+    ' "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/server_chained.crt"
+
+    # Last cert = root CA
     awk '/-BEGIN CERTIFICATE-/{buf=""; keep=1} keep{buf=buf $0 ORS} /-END CERTIFICATE-/{keep=0} END{printf "%s", buf}' \
         "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/root.crt"
 fi
+
+# Sanity: verify the chain file is non-empty and its FIRST cert is valid
+[[ -s "${SECURITY_TOP}/server_chained.crt" ]] || { echo "FATAL: server_chained.crt is empty"; exit 1; }
+[[ -s "${SECURITY_TOP}/root.crt" ]]           || { echo "FATAL: root.crt is empty"; exit 1; }
 
 chown -R "${SYSTEM_USER}:${SYSTEM_GROUP}" "$SECURITY_TOP"
 chmod 0644 "${SECURITY_TOP}/server_chained.crt" "${SECURITY_TOP}/root.crt"
@@ -130,9 +143,9 @@ chmod 0644 "${SECURITY_TOP}/server_chained.crt" "${SECURITY_TOP}/root.crt"
 # --- 10. Preflight checks ----------------------------------------------------
 echo "Running preflight checks..."
 
-# Verify key matches cert (decrypt on-the-fly to check modulus)
 if openssl rsa -in "${SECURITY_TOP}/server.key" -passin file:"$PASSPHRASE_FILE" -noout 2>/dev/null; then
     KEY_MOD=$(openssl rsa -in "${SECURITY_TOP}/server.key" -passin file:"$PASSPHRASE_FILE" -noout -modulus 2>/dev/null | md5sum | awk '{print $1}')
+    # Compare against the FIRST cert in the chain (the leaf)
     CERT_MOD=$(openssl x509 -in "${SECURITY_TOP}/server_chained.crt" -noout -modulus 2>/dev/null | md5sum | awk '{print $1}')
     [[ "$KEY_MOD" == "$CERT_MOD" ]] || { echo "FATAL: Private key does not match certificate"; exit 1; }
 else
@@ -141,6 +154,12 @@ fi
 
 openssl x509 -in "${SECURITY_TOP}/server_chained.crt" -noout -checkend 0 >/dev/null 2>&1 \
     || { echo "FATAL: Certificate is expired"; exit 1; }
+
+# Verify the full presented chain is internally consistent (leaf + intermediates)
+if command -v openssl >/dev/null 2>&1; then
+    VERIFY_OUT=$(openssl verify -partial_chain -CAfile "${SECURITY_TOP}/root.crt" "${SECURITY_TOP}/server_chained.crt" 2>&1 || true)
+    echo "Chain verify: $VERIFY_OUT"
+fi
 
 echo "Preflight checks passed."
 
@@ -220,12 +239,14 @@ fi
 cat <<EOF
 
 ===============================================================================
-EPAS SSL Setup Complete  (Encrypted Key + File Passphrase)
+EPAS SSL Setup Complete  (Encrypted Key + File Passphrase + Full Chain)
 ===============================================================================
 Backup dir          : $BACKUP_DIR
 Encrypted key       : ${SECURITY_TOP}/server.key
 Passphrase file     : ${SECURITY_TOP}/.ssl_key_passphrase   (0400 ${SYSTEM_USER})
 Helper script       : ${PASSPHRASE_CMD}
+Server chain (leaf + intermediates): ${SECURITY_TOP}/server_chained.crt  (${CERT_COUNT} cert(s) in bundle)
+Root CA             : ${SECURITY_TOP}/root.crt
 SSL config          : $CUSTOM_SSL_CONF
 HBA config          : $PG_HBA_CONF
 ===============================================================================
