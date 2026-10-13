@@ -44,8 +44,8 @@ PACKAGES=(
     "${PACKAGE_NAME}-edb_wait_states"              # EDB proprietary wait states
 	"edb-as${EPAS_VERSION}-query-advisor*"
 	"edb-as${EPAS_VERSION}-stat_monitor*"
-    "edb-pg${EPAS_VERSION}-pgaudit*"               # Corrected: edb-pg17-pgaudit
-    "edb-pg${EPAS_VERSION}-pg-cron*"               # Corrected: edb-pg17-pg_cron
+    #"edb-pg${EPAS_VERSION}-pgaudit*"              #Only if build is not enought # Corrected: edb-pg17-pgaudit
+    #"edb-pg${EPAS_VERSION}-pg-cron*"              #only if needed # Corrected: edb-pg17-pg_cron
     "pg_repack"              
     "edb-lasso"                                    # Dependency for PWR
     "edb-pwr"                                      # Global utility (if repo enabled)
@@ -159,7 +159,7 @@ port = 5444
 listen_addresses='*'
 
 # Consolidated Performance, Compatibility, & Audit Framework Tracking
-shared_preload_libraries = '$libdir/dbms_pipe,$libdir/edb_gen,$libdir/dbms_aq,$libdir/sql-profiler,edb_wait_states,edb_stat_monitor,query_advisor,pg_stat_statements,pgaudit,pg_cron,auto_explain'
+shared_preload_libraries = '$libdir/dbms_pipe,$libdir/edb_gen,$libdir/dbms_aq,$libdir/edb-filter-log,$libdir/sql-profiler,edb_wait_states,edb_stat_monitor,query_advisor,pg_stat_statements,pgaudit,pg_cron,auto_explain'
 
 # ==========================================
 # Extension Settings

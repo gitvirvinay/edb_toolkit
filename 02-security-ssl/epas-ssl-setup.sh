@@ -3,12 +3,24 @@ set -euo pipefail
 
 # -----------------------------------------------------------------------------
 # epas-ssl-setup.sh  —  Encrypted-key, file-based passphrase (Arch 2A)
-#   v2: intermediates are preserved in server_chained.crt (leaf + chain),
-#       root.crt = last cert only.
+#   v3: PEM bundle order is now ENFORCED and DOCUMENTED as:
+#
+#         -----BEGIN ENCRYPTED PRIVATE KEY-----     (1) private key  FIRST
+#         -----BEGIN CERTIFICATE-----               (2) server/leaf  certificate
+#         -----BEGIN CERTIFICATE-----               (3..n-1) intermediate(s)
+#         -----BEGIN CERTIFICATE-----               (n) root CA      LAST
+#
+#   Results:
+#       server_chained.crt = leaf + intermediate(s)   (all certs EXCEPT the last)
+#       root.crt           = last cert only           (root CA)
+#
+#   The key-modulus check matches the private key against the FIRST cert in
+#   the bundle (= leaf), which is only correct with this ordering.
+#
 # Usage:  sudo ./epas-ssl-setup.sh --env config.env [-b /path/to/bundle.pem]
 # -----------------------------------------------------------------------------
 
-# --- 1. Parse args (only --env and --bundle) ---------------------------------
+# --- 1. Parse args ------------------------------------------------------------
 ENV_FILE=""
 INPUT_PEM_BUNDLE=""
 
@@ -16,9 +28,9 @@ usage() { echo "Usage: $0 --env /path/to/config.env [-b /path/to/bundle.pem]"; e
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --env)    ENV_FILE="${2:-}"; shift 2 ;;
+        --env)       ENV_FILE="${2:-}"; shift 2 ;;
         -b|--bundle) INPUT_PEM_BUNDLE="${2:-}"; shift 2 ;;
-        -h|--help) usage ;;
+        -h|--help)   usage ;;
         *) echo "Unknown option: $1"; usage ;;
     esac
 done
@@ -26,7 +38,7 @@ done
 [[ -n "$ENV_FILE" ]] || usage
 [[ -f "$ENV_FILE" ]] || { echo "FATAL: Env file not found: $ENV_FILE"; exit 1; }
 
-# --- 2. Load & validate env --------------------------------------------------
+# --- 2. Load & validate env ---------------------------------------------------
 set -a
 # shellcheck source=/dev/null
 source "$ENV_FILE"
@@ -36,31 +48,40 @@ for v in DATA_TOP SECURITY_TOP SYSTEM_USER SYSTEM_GROUP SERVICE_NAME PRIMARY_POR
     [[ -z "${!v:-}" ]] && { echo "FATAL: Missing env var: $v"; exit 1; }
 done
 
-# --- 3. Bundle path ----------------------------------------------------------
+# --- 3. Bundle path -----------------------------------------------------------
 if [[ -z "$INPUT_PEM_BUNDLE" ]]; then
     read -r -p "Enter full path to PEM bundle: " INPUT_PEM_BUNDLE
 fi
 [[ -f "$INPUT_PEM_BUNDLE" ]] || { echo "FATAL: Bundle not found: $INPUT_PEM_BUNDLE"; exit 1; }
 
-# --- 4. Prep directories & backup bucket -------------------------------------
+echo "Expected bundle order: PRIVATE KEY -> server cert -> intermediates -> root CA (last)."
+
+# --- 4. Prep directories & backup bucket --------------------------------------
 mkdir -p "$SECURITY_TOP" "${DATA_TOP}/conf.d"
 chmod 0700 "$SECURITY_TOP"
 
 BACKUP_DIR="${SECURITY_TOP}/.backup-$(date +%Y%m%d%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 
-backup() {
-    if [[ -e "$1" ]]; then
-        cp -a "$1" "$BACKUP_DIR/"
-    fi
-}
+backup() { [[ -e "$1" ]] && cp -a "$1" "$BACKUP_DIR/"; }
 
-# --- 5. Extract private key & enforce encryption -----------------------------
+# --- 5. Extract private key & ENFORCE position + encryption -------------------
 echo "Extracting private key from bundle..."
 awk '/-BEGIN .*PRIVATE KEY-/,/-END .*PRIVATE KEY-/' "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/server.key.tmp"
 
 if [[ ! -s "${SECURITY_TOP}/server.key.tmp" ]]; then
     echo "FATAL: No private key found in bundle."
+    exit 1
+fi
+
+# Order check: key block must appear BEFORE the first certificate block.
+KEY_START_LINE=$(grep -n -m1 -- '-BEGIN .*PRIVATE KEY-' "$INPUT_PEM_BUNDLE" | cut -d: -f1)
+FIRST_CERT_LINE=$(grep -n -m1 -- '-BEGIN CERTIFICATE-' "$INPUT_PEM_BUNDLE" | cut -d: -f1)
+
+if [[ -n "$FIRST_CERT_LINE" && "$KEY_START_LINE" -gt "$FIRST_CERT_LINE" ]]; then
+    rm -f "${SECURITY_TOP}/server.key.tmp"
+    echo "FATAL: Bundle order violation - private key must come BEFORE the server certificate."
+    echo "       Required order: key -> server cert -> intermediates -> root CA."
     exit 1
 fi
 
@@ -70,7 +91,7 @@ if openssl pkey -in "${SECURITY_TOP}/server.key.tmp" -noout -passin pass:_DUMMY_
     exit 1
 fi
 
-# --- 6. Prompt for passphrase (mandatory, non-empty, validated) --------------
+# --- 6. Prompt for passphrase (mandatory, non-empty, validated) ---------------
 while true; do
     read -s -r -p "Enter server.key decryption passphrase: " KEY_PASS
     echo
@@ -86,7 +107,7 @@ backup "${SECURITY_TOP}/server.key"
 mv "${SECURITY_TOP}/server.key.tmp" "${SECURITY_TOP}/server.key"
 chmod 0600 "${SECURITY_TOP}/server.key"
 
-# --- 7. Store passphrase in hidden file --------------------------------------
+# --- 7. Store passphrase in hidden file ----------------------------------------
 PASSPHRASE_FILE="${SECURITY_TOP}/.ssl_key_passphrase"
 backup "$PASSPHRASE_FILE"
 
@@ -94,7 +115,7 @@ printf '%s' "$KEY_PASS" > "$PASSPHRASE_FILE"
 chmod 0400 "$PASSPHRASE_FILE"
 chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$PASSPHRASE_FILE"
 
-# --- 8. Create helper script for PostgreSQL ----------------------------------
+# --- 8. Helper script for PostgreSQL -------------------------------------------
 PASSPHRASE_CMD="${SECURITY_TOP}/read_passphrase.sh"
 backup "$PASSPHRASE_CMD"
 
@@ -105,10 +126,10 @@ EOF
 chmod 0500 "$PASSPHRASE_CMD"
 chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$PASSPHRASE_CMD"
 
-# --- 9. Extract certificates -------------------------------------------------
-# Bundle order requirement:  [leaf FIRST] [intermediates...] [root LAST]
-#   server_chained.crt = leaf + intermediates (all certs EXCEPT the last)
-#   root.crt           = last cert only (root CA)
+# --- 9. Extract certificates ----------------------------------------------------
+# With the enforced order (leaf FIRST, root LAST):
+#   server_chained.crt = every cert EXCEPT the last  (leaf + intermediates)
+#   root.crt           = the last cert only          (root CA)
 echo "Extracting certificates..."
 
 CERT_COUNT=$(grep -c "BEGIN CERTIFICATE" "$INPUT_PEM_BUNDLE" || true)
@@ -121,33 +142,31 @@ if [[ "$CERT_COUNT" -le 1 ]]; then
     awk '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/' "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/server_chained.crt"
     cp "${SECURITY_TOP}/server_chained.crt" "${SECURITY_TOP}/root.crt"
 else
-    # Full chain: everything except the LAST cert goes to the server chain
     awk -v total="$CERT_COUNT" '
         /-BEGIN CERTIFICATE-/ { n++; skip = (n == total) }
         skip { next }
         { print }
     ' "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/server_chained.crt"
 
-    # Last cert = root CA
     awk '/-BEGIN CERTIFICATE-/{buf=""; keep=1} keep{buf=buf $0 ORS} /-END CERTIFICATE-/{keep=0} END{printf "%s", buf}' \
         "$INPUT_PEM_BUNDLE" > "${SECURITY_TOP}/root.crt"
 fi
 
-# Sanity: verify the chain file is non-empty and its FIRST cert is valid
 [[ -s "${SECURITY_TOP}/server_chained.crt" ]] || { echo "FATAL: server_chained.crt is empty"; exit 1; }
 [[ -s "${SECURITY_TOP}/root.crt" ]]           || { echo "FATAL: root.crt is empty"; exit 1; }
 
 chown -R "${SYSTEM_USER}:${SYSTEM_GROUP}" "$SECURITY_TOP"
 chmod 0644 "${SECURITY_TOP}/server_chained.crt" "${SECURITY_TOP}/root.crt"
 
-# --- 10. Preflight checks ----------------------------------------------------
+# --- 10. Preflight checks --------------------------------------------------------
 echo "Running preflight checks..."
 
+# Match key against the FIRST cert in the chain (the leaf) - valid only
+# because the bundle order is enforced in step 5.
 if openssl rsa -in "${SECURITY_TOP}/server.key" -passin file:"$PASSPHRASE_FILE" -noout 2>/dev/null; then
     KEY_MOD=$(openssl rsa -in "${SECURITY_TOP}/server.key" -passin file:"$PASSPHRASE_FILE" -noout -modulus 2>/dev/null | md5sum | awk '{print $1}')
-    # Compare against the FIRST cert in the chain (the leaf)
     CERT_MOD=$(openssl x509 -in "${SECURITY_TOP}/server_chained.crt" -noout -modulus 2>/dev/null | md5sum | awk '{print $1}')
-    [[ "$KEY_MOD" == "$CERT_MOD" ]] || { echo "FATAL: Private key does not match certificate"; exit 1; }
+    [[ "$KEY_MOD" == "$CERT_MOD" ]] || { echo "FATAL: Private key does not match certificate (leaf)"; exit 1; }
 else
     echo "Skipping RSA modulus check (non-RSA key)"
 fi
@@ -155,7 +174,6 @@ fi
 openssl x509 -in "${SECURITY_TOP}/server_chained.crt" -noout -checkend 0 >/dev/null 2>&1 \
     || { echo "FATAL: Certificate is expired"; exit 1; }
 
-# Verify the full presented chain is internally consistent (leaf + intermediates)
 if command -v openssl >/dev/null 2>&1; then
     VERIFY_OUT=$(openssl verify -partial_chain -CAfile "${SECURITY_TOP}/root.crt" "${SECURITY_TOP}/server_chained.crt" 2>&1 || true)
     echo "Chain verify: $VERIFY_OUT"
@@ -163,7 +181,7 @@ fi
 
 echo "Preflight checks passed."
 
-# --- 11. Generate ssl.conf ---------------------------------------------------
+# --- 11. Generate ssl.conf --------------------------------------------------------
 CUSTOM_SSL_CONF="${DATA_TOP}/conf.d/ssl.conf"
 backup "$CUSTOM_SSL_CONF"
 
@@ -182,7 +200,7 @@ EOF
 chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$CUSTOM_SSL_CONF"
 chmod 0644 "$CUSTOM_SSL_CONF"
 
-# --- 12. Generate pg_hba.conf -----------------------------------------------
+# --- 12. Generate pg_hba.conf ------------------------------------------------------
 PG_HBA_CONF="${DATA_TOP}/pg_hba.conf"
 backup "$PG_HBA_CONF"
 
@@ -204,9 +222,8 @@ EOF
 chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$PG_HBA_CONF"
 chmod 0600 "$PG_HBA_CONF"
 
-# --- Ensure conf.d is included in postgresql.conf ---------------------------
+# --- Ensure conf.d is included in postgresql.conf ---------------------------------
 PG_CONF="${DATA_TOP}/postgresql.conf"
-
 if ! grep -qE "^include_dir\s*=\s*['\"]conf.d['\"]" "$PG_CONF" 2>/dev/null; then
     echo "Adding include_dir to ${PG_CONF}..."
     echo "include_dir = 'conf.d'" >> "$PG_CONF"
@@ -214,7 +231,7 @@ if ! grep -qE "^include_dir\s*=\s*['\"]conf.d['\"]" "$PG_CONF" 2>/dev/null; then
     chmod 0600 "$PG_CONF"
 fi
 
-# --- 13. Validate config & restart -------------------------------------------
+# --- 13. Validate config & restart ---------------------------------------------------
 echo "Validating configuration..."
 PG_CTL=$(command -v pg_ctl 2>/dev/null || command -v pg_ctl17 2>/dev/null || true)
 if [[ -n "$PG_CTL" ]]; then
@@ -227,7 +244,7 @@ systemctl restart "$SERVICE_NAME" || { echo "FATAL: Failed to restart $SERVICE_N
 sleep 2
 systemctl is-active --quiet "$SERVICE_NAME" || { echo "FATAL: Service did not start"; exit 1; }
 
-# --- 14. Post-restart SSL verification ---------------------------------------
+# --- 14. Post-restart SSL verification ----------------------------------------------
 if command -v psql >/dev/null 2>&1; then
     SSL_STATUS=$(su - "$SYSTEM_USER" -c "psql -p $PRIMARY_PORT -d postgres -Atc \"SHOW ssl;\" 2>/dev/null" || true)
     [[ "$SSL_STATUS" == "on" ]] && echo "SSL is active (ssl = on)" || echo "WARNING: Could not confirm SSL via psql"
@@ -235,7 +252,7 @@ else
     echo "psql not available for verification"
 fi
 
-# --- 15. Summary -------------------------------------------------------------
+# --- 15. Summary ----------------------------------------------------------------------
 cat <<EOF
 
 ===============================================================================
