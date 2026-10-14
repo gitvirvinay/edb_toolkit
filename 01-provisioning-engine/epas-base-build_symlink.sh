@@ -268,7 +268,7 @@ stage_template "04-extensions.conf" <<EOF
 # WARNING: every module in shared_preload_libraries MUST be installed
 #          or the server will refuse to start (see pgaudit / pg_cron notes).
 
-shared_preload_libraries = '\$libdir/dbms_pipe,\$libdir/edb_gen,\$libdir/dbms_aq,\$libdir/sql-profiler,\$libdir/edb-filter-log,edb_wait_states,edb_stat_monitor,query_advisor,pg_stat_statements,pgaudit,pg_cron,auto_explain'
+shared_preload_libraries = '\$libdir/dbms_pipe,\$libdir/edb_gen,\$libdir/dbms_aq,\$libdir/sql-profiler,\$libdir/edb_filter_log,edb_wait_states,edb_stat_monitor,query_advisor,pg_stat_statements,auto_explain'
 
 # edb_wait_states
 edb_wait_states.retention_period = 7776000   # 90 days
