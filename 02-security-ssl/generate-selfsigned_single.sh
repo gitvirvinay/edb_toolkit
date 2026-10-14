@@ -40,7 +40,7 @@ cat > "$WORKDIR/server.ext" <<EOF
 basicConstraints=CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:${DOMAIN}, IP:${DOMAIN}
+subjectAltName = DNS:${DOMAIN}
 EOF
 
 openssl req -new \
