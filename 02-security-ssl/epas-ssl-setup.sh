@@ -63,7 +63,21 @@ chmod 0700 "$SECURITY_TOP"
 BACKUP_DIR="${SECURITY_TOP}/.backup-$(date +%Y%m%d%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 
-backup() { [[ -e "$1" ]] && cp -a "$1" "$BACKUP_DIR/"; }
+#backup() { [[ -e "$1" ]] && cp -a "$1" "$BACKUP_DIR/"; }
+# --- Improved Backup Function ---
+backup() {
+    local target="$1"
+    if [[ -e "$target" ]]; then
+        # Option A: Preserve full path under BACKUP_DIR
+        mkdir -p "${BACKUP_DIR}$(dirname "$target")"
+        cp -a "$target" "${BACKUP_DIR}${target}"
+        
+        # Option B (Alternative): Append timestamp if backing up to flat directory
+        # local filename
+        # filename=$(basename "$target")
+        # cp -a "$target" "${BACKUP_DIR}/${filename}.orig.$(date +%s)"
+    fi
+}
 
 # --- 5. Extract private key & ENFORCE position + encryption -------------------
 echo "Extracting private key from bundle..."
