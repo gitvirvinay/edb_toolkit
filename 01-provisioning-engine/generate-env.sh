@@ -6,6 +6,13 @@ ENV_FILE="${1:-deploy.env}"
 log() { echo -e "\e[32m[INFO]\e[0m $1"; }
 warn() { echo -e "\e[33m[WARN]\e[0m $1"; }
 
+# Normalize any version-ish string to a bare number.
+# Handles: 15 | as15 | edb-as15 | edb-as-15 | edb-as15-server |
+#          edb-as-15.service | edb-as-15-server.service | /usr/edb/as15
+normalize_epas_version() {
+    echo "$1" | grep -oE '[0-9]+' | head -n1
+}
+
 # Helper to prompt user interactively with a default value
 prompt_var() {
     local prompt_text="$1"
@@ -41,12 +48,12 @@ if command -v systemctl &>/dev/null; then
     # Look for ACTIVE edb-as-<N> services (failed/inactive units are ignored)
     ACTIVE_SVC=$(systemctl list-units --type=service --state=running,active \
                  --no-legend --no-pager 2>/dev/null \
-                 | awk '/edb-as-[0-9]+\.service/ {print $1; exit}' || true)
+                 | awk '/edb-as-?[0-9]+.*\.service/ {print $1; exit}' || true)
 
     if [[ -n "$ACTIVE_SVC" ]]; then
         RUNNING="true"
         log "Detected ACTIVE EPAS service: $ACTIVE_SVC"
-        DETECTED_VER=$(echo "$ACTIVE_SVC" | sed -E 's/edb-as([0-9]+)\.service/\1/')
+        DETECTED_VER=$(normalize_epas_version "$ACTIVE_SVC")
 
         # Pull PGDATA from the drop-in override first, then the unit file
         DROPIN="/etc/systemd/system/${ACTIVE_SVC%.service}.service.d/override.conf"
@@ -81,7 +88,7 @@ if [[ -z "$DETECTED_DATA_TOP" ]] && command -v ps &>/dev/null; then
         log "Detected running postmaster with PGDATA=${DETECTED_DATA_TOP}"
         # Version from PG_VERSION file inside the data dir (most reliable)
         if [[ -f "${DETECTED_DATA_TOP}/PG_VERSION" ]]; then
-            DETECTED_VER=$(cat "${DETECTED_DATA_TOP}/PG_VERSION" 2>/dev/null | tr -d '[:space:]')
+            DETECTED_VER=$(normalize_epas_version "$(cat "${DETECTED_DATA_TOP}/PG_VERSION" 2>/dev/null)")
         fi
     fi
 fi
@@ -95,7 +102,7 @@ if [[ -z "$DETECTED_DATA_TOP" ]]; then
             DETECTED_DATA_TOP=$(dirname "$pidfile")
             RUNNING="true"
             [[ -f "${DETECTED_DATA_TOP}/PG_VERSION" ]] && \
-                DETECTED_VER=$(cat "${DETECTED_DATA_TOP}/PG_VERSION" 2>/dev/null | tr -d '[:space:]')
+                DETECTED_VER=$(normalize_epas_version "$(cat "${DETECTED_DATA_TOP}/PG_VERSION" 2>/dev/null)")
             break
         fi
     done
@@ -103,13 +110,13 @@ fi
 
 # --- Installed-package fallback (version only) ---------------------------------------
 if [[ -z "${DETECTED_VER}" ]] && command -v rpm &>/dev/null; then
-    DETECTED_VER=$(rpm -qa | grep -E '^edb-as[0-9]+-server' \
-                   | sed -E 's/edb-as([0-9]+)-server.*/\1/' | sort -V | tail -n1 || true)
+    DETECTED_VER=$(rpm -qa | grep -E '^edb-as-?[0-9]+-server' \
+                   | head -n1 | normalize_epas_version || true)
 fi
 
 if [[ -z "${DETECTED_VER}" && -d "/usr/edb" ]]; then
     DETECTED_VER=$(ls -d /usr/edb/as* 2>/dev/null | grep -E 'as[0-9]+$' \
-                   | sed 's/.*as//' | sort -V | tail -n1 || true)
+                   | head -n1 | normalize_epas_version || true)
 fi
 
 [[ "$RUNNING" == "true" ]] && warn "Running EPAS instance detected - values below will default to the LIVE configuration"
@@ -118,6 +125,9 @@ fi
 # 1. EPAS VERSION PROMPT
 # ==========================================
 prompt_var "Enter EPAS Version" "${DETECTED_VER:-17}" "EPAS_VERSION"
+EPAS_VERSION=$(normalize_epas_version "$EPAS_VERSION")
+[[ "$EPAS_VERSION" =~ ^[0-9]+$ ]] || { echo "FATAL: could not derive a numeric EPAS version from '${EPAS_VERSION}'"; exit 1; }
+log "Using EPAS version: ${EPAS_VERSION}"
 SRC_BINARY_DIR="/usr/edb/as${EPAS_VERSION}"
 
 # ==========================================
@@ -137,7 +147,7 @@ fi
 prompt_var "Enter DATA_TOP directory" "$DETECTED_DATA_TOP" "DATA_TOP"
 
 DEFAULT_BIN_TOP="$(dirname "$(dirname "$DATA_TOP")")/binary/as${EPAS_VERSION}"
-prompt_var "Enter BINARY_TOP directory" "${DEFAULT_BIN_TOP#/}" "BINARY_TOP"
+prompt_var "Enter BINARY_TOP directory" "$DEFAULT_BIN_TOP" "BINARY_TOP"
 
 SECURITY_TOP="${DATA_TOP}/security"
 SERVICE_NAME="edb-as-${EPAS_VERSION}"
