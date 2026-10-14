@@ -1,205 +1,150 @@
-# EPAS SSL Setup Toolkit
+# EPAS 17 SSL Setup and Deployment Toolkit
 
-Self-contained SSL certificate generation and deployment scripts for **EDB Advanced Server 17** (EPAS 17) on RHEL-compatible systems.
-
----
-
-## Scripts
-
-| File | Purpose |
-|------|---------|
-| `epas-ssl-setup.sh` | Deploys an **encrypted** PEM bundle, generates `ssl.conf` + `pg_hba.conf`, and restarts the cluster. |
-| `generate-selfsigned.sh` | Creates a **self-signed, encrypted, multi-SAN** PEM bundle for one or more hosts. |
-| `deploy_ssl.env` | Site-specific configuration (paths, users, network topology). |
+This directory contains deployment configuration templates and automated scripts to configure SSL/TLS for EnterpriseDB Postgres Advanced Server (EPAS) 17 using an encrypted private key and a file-based passphrase architecture.
 
 ---
 
-## Quick Start — Single Server
+## Architecture Overview
 
-### 1. Create your environment file
+The setup enforces end-to-end security for EPAS 17 database environments using standard PEM bundles:
+
+* **Encrypted Key Architecture:** The database private key (`server.key`) is stored in an encrypted format.
+* **Automated Decryption at Startup:** The passphrase is held in a protected file (`.ssl_key_passphrase`, `0400` permissions) accessed exclusively by an automated wrapper script (`read_passphrase.sh`, `0500` permissions) via the PostgreSQL parameter `ssl_passphrase_command`.
+* **Strict PEM Bundle Order:** To prevent key-certificate mismatches, the bundle structure is validated in the following order:
+  1. `-----BEGIN ENCRYPTED PRIVATE KEY-----` (Private Key)
+  2. `-----BEGIN CERTIFICATE-----` (Server / Leaf Certificate)
+  3. `-----BEGIN CERTIFICATE-----` (Intermediate CA Certificate(s) - optional)
+  4. `-----BEGIN CERTIFICATE-----` (Root CA Certificate)
+
+---
+
+## File Summary
+
+| File Name | Purpose |
+| :--- | :--- |
+| `deploy.env.example` | Environment configuration template containing directory paths, ports, service names, and network access control rules. |
+| `epas-ssl-setup.sh` | Main deployment script. Parses environmental settings, extracts key/cert files, validates RSA modulus alignment, generates `ssl.conf` and `pg_hba.conf`, and reloads EPAS. |
+| `generate-selfsigned_SAN.sh` | Utility script to generate a multi-host/SAN self-signed SSL bundle suitable for High Availability (Primary + Standby) test clusters. |
+| `generate-selfsigned_single.sh` | Utility script to generate a single-host self-signed SSL bundle for local development or single-node testing. |
+
+---
+
+## Quick Start Guide
+
+### Prerequisites
+* RHEL / Rocky Linux / CentOS or compatible system running EPAS 17.
+* `root` or `sudo` privileges on target host(s).
+* OpenSSL CLI installed.
+
+---
+
+### Step 1: Prepare Environment Configuration
+
+1. Copy the example environment file:
+   ```bash
+   cp deploy.env.example deploy.env
+   ```
+2. Edit `deploy.env` to reflect your target database environment and network topography:
+   * **Directories:** Adjust `DATA_TOP` and `SECURITY_TOP` paths.
+   * **Service & System User:** Set `SYSTEM_USER` (default: `enterprisedb`) and `SERVICE_NAME` (default: `edb-as-17`).
+   * **Networking:** Update `PRIMARY_HOST`, `STANDBY_HOST`, and `SUBNET_CIDR`.
+
+---
+
+### Step 2: Generate or Obtain SSL Bundle
+
+Choose one of the following methods depending on your target architecture.
+
+#### Option A: High Availability Cluster (Multi-Host SAN)
+Use this option if you are deploying a Primary/Standby pair with `generate-selfsigned_SAN.sh`.
+
+1. Open `generate-selfsigned_SAN.sh` and update hostnames and IP addresses:
+   ```bash
+   PRIMARY_HOST="server1.example.com"
+   PRIMARY_IP="192.168.1.11"
+   STANDBY_HOST="server2.example.com"
+   STANDBY_IP="192.168.1.12"
+   ```
+2. Run the script:
+   ```bash
+   chmod +x generate-selfsigned_SAN.sh
+   ./generate-selfsigned_SAN.sh /tmp/epas_bundle.pem 365
+   ```
+3. Enter and confirm the server key passphrase when prompted.
+4. Distribute `/tmp/epas_bundle.pem` to both host machines.
+
+#### Option B: Single Host Environment
+Use this option for standalone instances or single-server testing environments using `generate-selfsigned_single.sh`.
 
 ```bash
-mkdir -p /u001/data/as17/security
-cat > /u001/data/as17/security/deploy_ssl.env <<'EOF'
-DATA_TOP="/u001/data/as17"
-SECURITY_TOP="/u001/data/as17/security"
-SYSTEM_USER="enterprisedb"
-SYSTEM_GROUP="enterprisedb"
-SERVICE_NAME="edb-as-17"
-PRIMARY_PORT=5444
-PRIMARY_HOST="192.168.1.11"
-STANDBY_HOST="192.168.1.12"
-SUBNET_CIDR="192.168.1.0/24"
-EOF
-chmod 600 /u001/data/as17/security/deploy_ssl.env
+chmod +x generate-selfsigned_single.sh
+./generate-selfsigned_single.sh /tmp/epas_bundle.pem db.example.com 365
 ```
 
-### 2. Generate a self-signed bundle
+#### Option C: Commercial or Enterprise CA Certificates
+If using certificates issued by an internal PKI or public CA:
+Ensure the PEM file is concatenated in the enforced order:
+```bash
+cat server.key leaf.crt intermediate.crt root.crt > /tmp/epas_bundle.pem
+```
+
+---
+
+### Step 3: Run the SSL Setup Script
+
+Execute `epas-ssl-setup.sh` as `root` (or via `sudo`), specifying your environment file and certificate bundle:
 
 ```bash
-./generate-selfsigned.sh /tmp/server_bundle.pem
+chmod +x epas-ssl-setup.sh
+sudo ./epas-ssl-setup.sh --env deploy.env -b /tmp/epas_bundle.pem
 ```
 
-You will be prompted to set a **passphrase** for the private key. Remember it.
+#### What the Setup Script Performs Automagically:
+1. Validates the existence of required environment variables.
+2. Verifies that the private key is encrypted and placed **before** certificate blocks in the PEM bundle.
+3. Prompts for key passphrase and tests key decryption via OpenSSL.
+4. Writes encrypted key to `${SECURITY_TOP}/server.key` (`0600`).
+5. Stores passphrase in `${SECURITY_TOP}/.ssl_key_passphrase` (`0400`, owned by system user).
+6. Generates helper wrapper `${SECURITY_TOP}/read_passphrase.sh` (`0500`).
+7. Splits bundle into `${SECURITY_TOP}/server_chained.crt` and `${SECURITY_TOP}/root.crt`.
+8. Verifies RSA key modulus against leaf certificate and checks expiration.
+9. Appends `include_dir = 'conf.d'` to `postgresql.conf` and creates `${DATA_TOP}/conf.d/ssl.conf`.
+10. Generates restrictive `${DATA_TOP}/pg_hba.conf` enforcing SSL for replication and local subnets.
+11. Restarts the database service using `systemctl` and checks runtime SSL status.
 
-### 3. Deploy on the server
+---
+
+## Verification & Troubleshooting
+
+### Check Database SSL Status
+Run the following query as the database administrative user:
+```bash
+su - enterprisedb -c "psql -p 5444 -d postgres -c 'SHOW ssl;'"
+```
+**Expected Output:**
+```text
+ ssl 
+-----
+ on
+(1 row)
+```
+
+### File Permission Matrix Verification
+Check that file permissions in `${SECURITY_TOP}` match requirements:
 
 ```bash
-sudo ./epas-ssl-setup.sh \
-    --env /u001/data/as17/security/deploy_ssl.env \
-    --bundle /tmp/server_bundle.pem
+ls -la /u001/data/as17/security/
 ```
 
-You will be prompted for the **same passphrase** you set in step 2.
-
-The script will:
-- Keep `server.key` **encrypted on disk**
-- Store the passphrase in `.ssl_key_passphrase` (hidden, `0400`)
-- Create a helper script `read_passphrase.sh` for PostgreSQL startup
-- Generate `ssl.conf` in `${DATA_TOP}/conf.d/`
-- Generate `pg_hba.conf` with `hostssl` enforcement
-- Restart `edb-as-17`
-- Verify `ssl = on` after restart
+* `.ssl_key_passphrase` $\rightarrow$ `0400` (`enterprisedb:enterprisedb`)
+* `read_passphrase.sh` $\rightarrow$ `0500` (`enterprisedb:enterprisedb`)
+* `server.key` $\rightarrow$ `0600` (`enterprisedb:enterprisedb`)
+* `server_chained.crt` $\rightarrow$ `0644` (`enterprisedb:enterprisedb`)
+* `root.crt` $\rightarrow$ `0644` (`enterprisedb:enterprisedb`)
 
 ---
 
-## Quick Start — Primary / Standby Pair
+## Security Notes
 
-Both servers must present a certificate whose **SAN** covers both hostnames/IPs.
-
-### 1. Edit `generate-selfsigned.sh`
-
-Set both hosts in the script header:
-
-```bash
-PRIMARY_HOST="server1.example.com"
-PRIMARY_IP="192.168.1.11"
-STANDBY_HOST="server2.example.com"
-STANDBY_IP="192.168.1.12"
-```
-
-### 2. Generate once, copy twice
-
-```bash
-# Generate on any secure build host
-./generate-selfsigned.sh /tmp/dual-host-bundle.pem
-
-# Copy to both servers
-scp /tmp/dual-host-bundle.pem root@server1:/tmp/
-scp /tmp/dual-host-bundle.pem root@server2:/tmp/
-```
-
-### 3. Deploy on each server
-
-Run the setup script **on server1** and **on server2** using the **same bundle**:
-
-```bash
-sudo ./epas-ssl-setup.sh \
-    --env /u001/data/as17/security/deploy_ssl.env \
-    --bundle /tmp/dual-host-bundle.pem
-```
-
-> **Note:** The passphrase you type must be the same on both nodes because they share the same encrypted private key.
-
----
-
-## Security Model
-
-| File | State | Permissions | Owner | Purpose |
-|------|-------|-------------|-------|---------|
-| `server.key` | **Encrypted** | `0600` | `enterprisedb` | Private key (never decrypted to disk) |
-| `.ssl_key_passphrase` | Plaintext | `0400` | `enterprisedb` | Passphrase read by PostgreSQL at startup |
-| `read_passphrase.sh` | Script | `0500` | `enterprisedb` | `ssl_passphrase_command` target |
-| `server_chained.crt` | PEM | `0644` | `enterprisedb` | Server certificate + intermediates |
-| `root.crt` | PEM | `0644` | `enterprisedb` | Trusted root CA for client verification |
-
-### How Passphrase Retrieval Works
-
-1. `systemctl start edb-as-17`
-2. PostgreSQL reads `ssl_passphrase_command = '/u001/data/as17/security/read_passphrase.sh'`
-3. It executes the helper as `enterprisedb`
-4. Helper runs `cat .ssl_key_passphrase`
-5. PostgreSQL receives passphrase via **stdout**, decrypts key **in memory**, loads it
-
-The key file on disk **never leaves its encrypted state**.
-
----
-
-## Directory Layout After Setup
-
-```
-/u001/data/as17/
-├── conf.d/
-│   └── ssl.conf              # SSL parameters (include'd by postgresql.conf)
-├── pg_hba.conf               # Generated: hostssl enforcement
-├── security/
-│   ├── deploy_ssl.env              # Your site config (chmod 600)
-│   ├── server.key            # ENCRYPTED private key
-│   ├── .ssl_key_passphrase   # Passphrase for PostgreSQL startup
-│   ├── read_passphrase.sh    # ssl_passphrase_command helper
-│   ├── server_chained.crt    # Server certificate chain
-│   ├── root.crt              # Root CA certificate
-│   └── .backup-YYYYMMDD/     # Timestamped backups of overwritten files
-```
-
----
-
-## Environment Variables Reference
-
-| Variable | Example | Description |
-|----------|---------|-------------|
-| `DATA_TOP` | `/u001/data/as17` | PostgreSQL data directory |
-| `SECURITY_TOP` | `/u001/data/as17/security` | Where keys/certs live |
-| `SYSTEM_USER` | `enterprisedb` | OS user running EPAS |
-| `SYSTEM_GROUP` | `enterprisedb` | OS group |
-| `SERVICE_NAME` | `edb-as-17` | systemd service name |
-| `PRIMARY_PORT` | `5444` | EPAS listen port |
-| `PRIMARY_HOST` | `192.168.1.11` | Primary node address |
-| `STANDBY_HOST` | `192.168.1.12` | Standby node address |
-| `SUBNET_CIDR` | `192.168.1.0/24` | Subnet for `hostssl` rules |
-
----
-
-## Troubleshooting
-
-### "Private key is NOT encrypted"
-Your bundle contains an unencrypted key. `epas-ssl-setup.sh` requires encryption. Re-run `generate-selfsigned.sh` and set a passphrase.
-
-### "Incorrect passphrase"
-The passphrase you typed does not decrypt the key. If you forgot it, regenerate the bundle.
-
-### Service fails to start after restart
-1. Check journal: `journalctl -u edb-as-17 -n 50`
-2. Check config syntax: `su - enterprisedb -c "pg_ctl -D /u001/data/as17 check"`
-3. Check permissions: `ls -la /u001/data/as17/security/`
-4. Restore from backup: `cp /u001/data/as17/security/.backup-*/pg_hba.conf /u001/data/as17/`
-
-### SSL handshake fails from client
-Ensure the client trusts `root.crt`:
-```bash
-psql "sslmode=verify-ca sslrootcert=/path/to/root.crt host=server1 ..."
-```
-
----
-
-## Certificate Renewal
-
-1. Generate a new bundle (same SANs, new expiry).
-2. Run `epas-ssl-setup.sh` again — it automatically backs up old files.
-3. No need to distribute a new `root.crt` if you kept the same CA.
-
----
-
-## Requirements
-
-- `openssl` >= 1.1.1
-- `systemctl`
-- `bash` >= 4.2
-- `ss` (iproute2) for post-restart verification
-- Run as `root` or via `sudo`
-
----
-
-## License
-
-Internal use only. No warranty. Review before production deployment.
+1. **Passphrase Storage:** The key passphrase is written to a hidden file (`.ssl_key_passphrase`). Permissions are restricted to `0400` owned by `SYSTEM_USER`. Ensure filesystem backups exclude or encrypt security metadata directories if exposed outside restricted infrastructure.
+2. **TDE Command Placeholders:** The `TDE_WRAP_CMD` and `TDE_UNWRAP_CMD` variables in `deploy.env.example` contain placeholder credentials. Always populate these settings dynamically via an enterprise secrets manager (e.g., HashiCorp Vault) during deployment pipelines.
