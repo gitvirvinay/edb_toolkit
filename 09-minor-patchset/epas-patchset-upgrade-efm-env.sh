@@ -36,8 +36,8 @@ sleep 3
 log_info "[Phase 3] Entering EPAS maintenance window"
 sudo systemctl stop "$EPAS_SERVICE"
 
-log_info "[Phase 4] Applying EFM package updates"
-dnf upgrade -y "edb-efm*" || true
+log_info "[Phase 4] Applying EPAS patchset updates"
+dnf upgrade -y "edb-as*"
 
 log_info "[Phase 5] Restarting EPAS"
 sudo systemctl start "$EPAS_SERVICE"
