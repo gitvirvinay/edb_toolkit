@@ -1,0 +1,8 @@
+.DS_Store
+*.swp
+# real environment files (templates are *.example)
+conf/site.env
+conf/tde.env
+deploy.env
+config.env
+migrate.env

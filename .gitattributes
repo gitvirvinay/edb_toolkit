@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Shell, SQL and env files must always use LF (CRLF breaks bash)
+*.sh text eol=lf
+*.sql text eol=lf
+*.env.example text eol=lf
+*.sample text eol=lf
+conf/sudoers.d/* text eol=lf
