@@ -1,0 +1,707 @@
+# ==============================================================================
+#  ~/.bashrc  -  EPAS environment for the database OS user (enterprisedb/postgres)
+#
+#  Merged from epas_env_detection.bashrc + postgres_user.bashrc. Independent of the
+#  build repo: it reads no site.env, only the live system and the settings below.
+#
+#  The live system is read first (systemd unit, running postmaster,
+#  postmaster.pid, postgresql*.conf). The settings in section 1 are fallbacks.
+#
+#  Quick reference
+#    epas [ver]                 switch this shell to an EPAS version (default: detected)
+#    epaslist                   installed versions: instance, unit, port, data, binaries
+#    pginfo                     environment + host summary
+#    pgstart   [--systemd|--pgctl] [--force]
+#    pgstop    [--systemd|--pgctl] [--force] [smart|fast|immediate]
+#    pgrestart [--systemd|--pgctl] [--force] [smart|fast|immediate]
+#    pgreload  [--systemd|--pgctl]
+#    pgstatus                   pg_ctl status + systemd unit state
+#    pgmode [auto|systemd|pg_ctl]   default control method for this shell
+#    pghealth pgactivity pglocks pgrepl pglog pgjournal pgsize pgwal mynet
+# ==============================================================================
+
+# System-wide defaults first, so nothing below gets overridden by them
+[ -f /etc/bashrc ] && . /etc/bashrc
+
+# ------------------------------------------------------------------------------
+# 1. SETTINGS (fallbacks only - the live system wins when it can be read)
+# ------------------------------------------------------------------------------
+EDB_DEPLOYMENT_ROOT="${EDB_DEPLOYMENT_ROOT:-/usr/edb}"     # binaries: <root>/asNN
+EDB_DATA_ROOT="${EDB_DATA_ROOT:-/u001/data}"               # data:     <root>/asNN
+EDB_DEFAULT_VERSION="${EDB_DEFAULT_VERSION:-17}"           # used when nothing is running
+EDB_CTL_MODE="${EDB_CTL_MODE:-auto}"                       # auto | systemd | pg_ctl
+EDB_ENV_VERBOSE="${EDB_ENV_VERBOSE:-yes}"                  # print pginfo after switching (interactive only)
+EDB_SET_LD_LIBRARY_PATH="${EDB_SET_LD_LIBRARY_PATH:-no}"   # EPAS binaries carry their own rpath
+# EDB_PGCTL_LOG=/path/file   # pg_ctl start/restart log (default: $PGDATA/pg_ctl_startup.log)
+
+# This .bashrc belongs to the cluster's superuser OS account, and initdb names the
+# database superuser after the OS user that ran it - so PGUSER = this OS account.
+# Anything already exported (PGUSER / PGDATABASE) still wins.
+if [[ -n ${PGUSER:-} ]]; then EPAS_PGUSER_SOURCE="environment"
+else PGUSER="$(id -un)"; EPAS_PGUSER_SOURCE="OS user"; fi
+export PGUSER
+export PGDATABASE="${PGDATABASE:-edb}"           # 'edb' = Oracle-compatible mode; 'postgres' in PostgreSQL mode
+
+# Last-resort ports: used only when the running cluster and its config files give nothing
+declare -A EPAS_PORT_MAP=( [14]=5103 [15]=5104 [16]=5105 [17]=5106 )
+
+# ------------------------------------------------------------------------------
+# 2. SHELL & HISTORY
+# ------------------------------------------------------------------------------
+export EDITOR="${EDITOR:-vi}"
+HISTSIZE=100000
+HISTFILESIZE=200000
+HISTTIMEFORMAT="%F %T  "
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend checkwinsize 2>/dev/null
+[[ ${PROMPT_COMMAND:-} == *"history -a"* ]] || PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+# Deliberately NOT set: 'pipefail' (breaks '| head' idioms interactively) and
+# 'noclobber' (uncomment if you want '>' to refuse overwriting; force with '>|').
+# set -o noclobber
+
+# ------------------------------------------------------------------------------
+# 3. INTERNAL HELPERS (detection)
+# ------------------------------------------------------------------------------
+__epas_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# Remove <EDB_DEPLOYMENT_ROOT>/asNN entries, an optional extra prefix and empty entries
+__epas_strip_paths() {
+    local -a parts; local p out=""
+    IFS=: read -ra parts <<< "$1"
+    for p in "${parts[@]}"; do
+        [[ -z $p ]] && continue
+        [[ $p == "$EDB_DEPLOYMENT_ROOT"/as[0-9]* ]] && continue
+        [[ -n ${2:-} && ( $p == "$2" || $p == "$2"/* ) ]] && continue
+        out+="${out:+:}$p"
+    done
+    printf '%s' "$out"
+}
+
+
+__epas_installed_versions() {
+    local d
+    for d in "$EDB_DEPLOYMENT_ROOT"/as[0-9]*; do
+        [[ -x $d/bin/psql && ${d##*/as} =~ ^[0-9]+$ ]] && echo "${d##*/as}"
+    done | sort -n
+}
+
+__epas_unit_exists() {
+    command -v systemctl &>/dev/null || return 1
+    [[ -n ${1:-} && $(systemctl show -p LoadState --value "edb-as-$1.service" 2>/dev/null) == loaded ]]
+}
+__epas_unit_active() {
+    command -v systemctl &>/dev/null && [[ -n ${1:-} ]] && systemctl is-active --quiet "edb-as-$1.service" 2>/dev/null
+}
+
+# Data directory from a process command line (-D <dir>)
+# SYNC: same logic in list_epas_instances.sh (operations) and generate-site-env.sh
+#       (build repo) - keep all three copies in sync when changing it.
+__epas_pid_datadir() {
+    local args re='(^|[[:space:]])-D[[:space:]]*([^[:space:]]+)'
+    args=$(tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline") || return 1
+    [[ $args =~ $re ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[2]}"
+}
+
+# PIDs of postmasters started from .../asNN/bin (EPAS binary is edb-postmaster).
+# SYNC: same logic in list_epas_instances.sh (operations) and generate-site-env.sh
+#       (build repo) - keep all three copies in sync when changing it.
+# Anchored: the program itself (argv[0]) must be the postmaster binary, so shells,
+# sudo or pg_ctl wrappers that merely mention it in their arguments don't match.
+__epas_postmaster_pids() {
+    pgrep -f -- "^[^ ]*/as$1/bin/(edb-postmaster|edb-postgres|postmaster|postgres)( |\$)" 2>/dev/null
+}
+
+# PID from <datadir>/postmaster.pid if that process is alive
+__epas_live_pid() {
+    local pid
+    [[ -r $1/postmaster.pid ]] || return 1
+    pid=$(head -n1 "$1/postmaster.pid" 2>/dev/null)
+    [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+__epas_unit_pgdata() {
+    local unit="edb-as-$1.service" d pid
+    __epas_unit_exists "$1" || return 1
+    # Effective environment = unit file + all drop-ins, already merged by systemd
+    d=$(systemctl show -p Environment --value "$unit" 2>/dev/null \
+        | grep -oE '(^|[[:space:]])PGDATA=[^[:space:]]+' | tail -n1)
+    d=${d#*PGDATA=}
+    if [[ -z $d ]]; then
+        pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null)
+        [[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] && d=$(__epas_pid_datadir "$pid")
+    fi
+    [[ -n $d ]] && printf '%s\n' "$d"
+}
+
+__epas_resolve_home() {
+    local v=$1 p
+    # 1. the binary the systemd unit actually starts
+    if __epas_unit_exists "$v"; then
+        p=$(systemctl show -p ExecStart --value "edb-as-$v.service" 2>/dev/null | grep -oE 'path=[^ ;]+' | head -n1)
+        p=${p#path=}
+        if [[ -n $p ]]; then p=$(dirname "$(dirname "$p")"); [[ -x $p/bin/psql ]] && { echo "$p"; return; }; fi
+    fi
+    # 2. standard package location
+    echo "$EDB_DEPLOYMENT_ROOT/as$v"
+}
+
+__epas_resolve_data() {
+    local v=$1 d pid
+    d=$(__epas_unit_pgdata "$v") && [[ -n $d ]] && { echo "$d"; return; }
+    for pid in $(__epas_postmaster_pids "$v"); do
+        d=$(__epas_pid_datadir "$pid") && { echo "$d"; return; }
+    done
+    for d in "$EDB_DATA_ROOT/as$v" "$EDB_DATA_ROOT/as$v/data" "/var/lib/edb/as$v/data"; do
+        [[ -f $d/PG_VERSION ]] && { echo "$d"; return; }
+    done
+    # Not readable as this user? fall back to directories that at least exist
+    for d in "$EDB_DATA_ROOT/as$v" "/var/lib/edb/as$v/data"; do
+        [[ -d $d ]] && { echo "$d"; return; }
+    done
+    echo "$EDB_DATA_ROOT/as$v"
+}
+
+# Value of a server parameter from the config files, read without logging in.
+# Same order the server reads them: postgresql.conf, conf.d/*.conf, postgresql.auto.conf;
+# the last setting wins. Prints '' if unset or the files are not readable (not the owner).
+__epas_conf_get() {   # __epas_conf_get PGDATA PARAM
+    local d=$1 param=$2 f v out=""
+    local -a files=("$d/postgresql.conf")
+    if [[ -d $d/conf.d ]]; then
+        while IFS= read -r f; do files+=("$f"); done < <(ls -1 "$d"/conf.d/*.conf 2>/dev/null | sort)
+    fi
+    files+=("$d/postgresql.auto.conf")
+    for f in "${files[@]}"; do
+        [[ -r $f ]] || continue
+        v=$(sed -nE "s/^[[:space:]]*${param}[[:space:]]*=[[:space:]]*'?([^'#]*[^'#[:space:]])'?.*/\1/p" "$f" | tail -n1)
+        if [[ -n $v ]]; then out=$v; fi
+    done
+    printf '%s' "$out"
+}
+
+# Port of the cluster in DATA, printed as "PORT<TAB>SOURCE".
+# Most reliable source first; the source is kept so pginfo can say where it came from.
+__epas_resolve_port() {
+    local v=$1 d=$2 p pid args all socks
+    local re_p='(^|[[:space:]])-p[[:space:]]*([0-9]+)'
+    # 1. the running cluster's own postmaster.pid, line 4 (owner/root)
+    if [[ -r $d/postmaster.pid ]]; then
+        p=$(sed -n 4p "$d/postmaster.pid" 2>/dev/null)
+        if [[ $p =~ ^[0-9]+$ ]]; then printf '%s\tpostmaster.pid\n' "$p"; return; fi
+    fi
+    # 2. -p on the running postmaster's command line (any user)
+    for pid in $(__epas_postmaster_pids "$v"); do
+        [[ $(__epas_pid_datadir "$pid") == "$d" ]] || continue
+        args=$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline")
+        if [[ $args =~ $re_p ]]; then printf '%s\tpostmaster -p option\n' "${BASH_REMATCH[2]}"; return; fi
+    done
+    # 3. config files, server precedence: postgresql.conf, conf.d, postgresql.auto.conf (owner/root)
+    p=$(__epas_conf_get "$d" port)
+    if [[ $p =~ ^[0-9]+$ ]]; then printf '%s\tconfig files\n' "$p"; return; fi
+    # 4. the only server socket, when this is the only postmaster on the host (any user)
+    all=$(pgrep -f '^[^ ]*/bin/(edb-postmaster|edb-postgres|postmaster|postgres)( |$)' 2>/dev/null | wc -l)
+    if (( all == 1 )) && [[ -n $(__epas_postmaster_pids "$v") ]]; then
+        socks=$(ls -1 /tmp/.s.PGSQL.* 2>/dev/null | grep -v '\.lock$')
+        if [[ -n $socks && $(wc -l <<< "$socks") -eq 1 ]]; then
+            printf '%s\tsocket %s\n' "${socks##*.}" "$socks"; return
+        fi
+    fi
+    # 5. guesses
+    if [[ -n ${EPAS_PORT_MAP[$v]:-} ]]; then printf '%s\tport map - fallback, verify!\n' "${EPAS_PORT_MAP[$v]}"
+    else printf '5444\tEPAS default - fallback, verify!\n'; fi
+}
+
+__epas_default_version() {
+    local v installed running=()
+    installed=$(__epas_installed_versions)
+    for v in $installed; do
+        if __epas_unit_active "$v" || [[ -n $(__epas_postmaster_pids "$v") ]]; then running+=("$v"); fi
+    done
+    if (( ${#running[@]} == 1 )); then echo "${running[0]}"; return; fi
+    (( ${#running[@]} > 1 )) && echo "NOTE: several EPAS versions are running (${running[*]}). Switch with: epas <ver>" >&2
+    grep -qx "$EDB_DEFAULT_VERSION" <<< "$installed" && { echo "$EDB_DEFAULT_VERSION"; return; }
+    [[ -n $installed ]] && { tail -n1 <<< "$installed"; return; }
+    echo "$EDB_DEFAULT_VERSION"
+}
+
+__epas_primary_ip() {
+    ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}'
+}
+__epas_subnet() {
+    local addr; addr=$(__epas_primary_ip)
+    [[ -n $addr ]] && ip -o -4 route show proto kernel scope link src "$addr" 2>/dev/null | awk '{print $1; exit}'
+}
+
+# ------------------------------------------------------------------------------
+# 4. VERSION SWITCHER
+# ------------------------------------------------------------------------------
+epaslist() {
+    local v versions home data port unit run mark
+    versions=$(__epas_installed_versions)
+    if [[ -z $versions ]]; then
+        echo "No EPAS installations found under $EDB_DEPLOYMENT_ROOT"; return 1
+    fi
+    printf '  %-4s %-9s %-17s %-6s %-32s %s\n' VER INSTANCE "SYSTEMD UNIT" PORT DATA BINARIES
+    for v in $versions; do
+        home=$(__epas_resolve_home "$v")
+        data=$(__epas_resolve_data "$v")
+        IFS=$'\t' read -r port _ <<< "$(__epas_resolve_port "$v" "$data")"
+        if __epas_unit_exists "$v"; then
+            unit="$(systemctl is-active "edb-as-$v.service" 2>/dev/null)/$(systemctl is-enabled "edb-as-$v.service" 2>/dev/null)"
+        else
+            unit="none"
+        fi
+        if __epas_live_pid "$data" >/dev/null || __epas_unit_active "$v" || [[ -n $(__epas_postmaster_pids "$v") ]]; then run=running; else run=stopped; fi
+        if [[ $v == "${EPAS_ACTIVE_VERSION:-}" ]]; then mark="*"; else mark=" "; fi
+        printf '%s %-4s %-9s %-17s %-6s %-32s %s\n' "$mark" "$v" "$run" "$unit" "$port" "$data" "$home"
+    done
+    echo "(* = active in this shell)"
+}
+
+epas() {
+    local v=${1:-} home data port old_home=${PGHOME:-}
+    [[ -z $v ]] && v=$(__epas_default_version)
+    if ! [[ $v =~ ^[0-9]+$ ]]; then
+        echo "ERROR: version must be numeric (got '$v')" >&2; return 1
+    fi
+
+    home=$(__epas_resolve_home "$v")
+    if [[ ! -x $home/bin/psql ]]; then
+        echo "ERROR: EPAS $v binaries not found at $home" >&2
+        epaslist >&2
+        return 1
+    fi
+    data=$(__epas_resolve_data "$v")
+    [[ -d $data ]] || echo "WARNING: data directory not found: $data" >&2
+    local port_src
+    IFS=$'\t' read -r port port_src <<< "$(__epas_resolve_port "$v" "$data")"
+
+    # Remove the previous version's paths, then add the new ones
+    PATH=$(__epas_strip_paths "$PATH" "$old_home")
+    MANPATH=$(__epas_strip_paths "${MANPATH:-}" "$old_home")
+    LD_LIBRARY_PATH=$(__epas_strip_paths "${LD_LIBRARY_PATH:-}" "$old_home")
+
+    export EPAS_ACTIVE_VERSION="$v" PGHOME="$home" PGDATA="$data" PGPORT="$port" EPAS_PORT_SOURCE="$port_src"
+    export PATH="$PGHOME/bin${PATH:+:$PATH}"
+    # Trailing ':' keeps the system man pages searchable
+    export MANPATH="$PGHOME/share/man:${MANPATH}${MANPATH:+:}"
+    if [[ $EDB_SET_LD_LIBRARY_PATH == yes ]]; then
+        export LD_LIBRARY_PATH="$PGHOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    elif [[ -z $LD_LIBRARY_PATH ]]; then
+        unset LD_LIBRARY_PATH
+    fi
+
+    # First version string = the server release; later ones are distro/build suffixes
+    EPAS_ACTIVE_SUBVERSION=$("$PGHOME/bin/psql" --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1)
+    export EPAS_ACTIVE_SUBVERSION="${EPAS_ACTIVE_SUBVERSION:-unknown}"
+    hash -r
+
+    if [[ $EDB_ENV_VERBOSE == yes && $- == *i* ]]; then pginfo; fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# 5. START / STOP / RESTART / RELOAD  -  systemd or pg_ctl
+#
+#  EDB_CTL_MODE=auto    -> follows whoever controls the cluster right now:
+#                            running, started by systemd -> systemd
+#                            running, started by pg_ctl  -> pg_ctl
+#                            stopped -> systemd if edb-as-<ver>.service exists, else pg_ctl
+#                          (reload always uses pg_ctl in auto: it is only a SIGHUP)
+#  EDB_CTL_MODE=systemd -> sudo systemctl ... edb-as-<ver>.service
+#  EDB_CTL_MODE=pg_ctl  -> pg_ctl -D $PGDATA ...
+#  Per call: pgstop --pgctl immediate   |   pgrestart --systemd
+#  Hand a manually started cluster over to systemd:  pgstop --pgctl; pgstart --systemd
+# ------------------------------------------------------------------------------
+
+# Who controls the cluster in DATA right now -> systemd | pg_ctl | stopped
+# SYNC: same logic in list_epas_instances.sh (operations) and generate-site-env.sh
+#       (build repo) - keep all three copies in sync when changing it.
+# Finds the live postmaster, then reads its cgroup (world-readable): a postmaster
+# started by systemd lives in the unit's cgroup, one started by pg_ctl does not.
+__epas_manager() {
+    local data=$1 v=$2 pid="" p cg
+    pid=$(__epas_live_pid "$data") || pid=""
+    if [[ -z $pid ]]; then                   # postmaster.pid not readable (not the owner)
+        for p in $(__epas_postmaster_pids "$v"); do
+            if [[ $(__epas_pid_datadir "$p") == "$data" ]]; then pid=$p; break; fi
+        done
+    fi
+    if [[ -z $pid ]]; then echo stopped; return 0; fi
+    cg=$(cat "/proc/$pid/cgroup" 2>/dev/null)
+    if [[ $cg == *"/edb-as-$v.service"* ]]; then echo systemd; else echo pg_ctl; fi
+}
+
+__epas_mgr_label() {
+    case $1 in
+        systemd) echo "systemd (edb-as-${EPAS_ACTIVE_VERSION}.service)" ;;
+        pg_ctl)  echo "pg_ctl (manual)" ;;
+        *)       echo "not running" ;;
+    esac
+}
+
+# pg_ctl must run as the owner of PGDATA: it refuses root, and other users cannot
+# read PGDATA (mode 0700). Root switches to the owner with runuser; anyone else is
+# refused - run as the owner or root.
+__epas_pg_ctl_check() {   # prints the owner if the current user may run pg_ctl, else errors
+    local owner me
+    owner=$(stat -c %U "$PGDATA" 2>/dev/null)
+    me=$(id -un)
+    if [[ -z $owner || $owner == root || $owner == UNKNOWN ]]; then
+        echo "ERROR: cannot determine a non-root owner of $PGDATA" >&2; return 1
+    fi
+    if [[ $me != "$owner" && $EUID -ne 0 ]]; then
+        echo "ERROR: pg_ctl must run as $owner (owner of $PGDATA). You are $me - run as $owner or root." >&2
+        return 1
+    fi
+    echo "$owner"
+}
+
+__epas_pg_ctl() {   # same arguments as pg_ctl
+    local owner
+    owner=$(__epas_pg_ctl_check) || return 1
+    if [[ $(id -un) == "$owner" ]]; then
+        "$PGHOME/bin/pg_ctl" "$@"
+    else
+        # runuser lives in /usr/sbin, which root's PATH may lack (e.g. after 'su' without '-')
+        local ru
+        ru=$(command -v runuser 2>/dev/null || ls /usr/sbin/runuser /sbin/runuser 2>/dev/null | head -n1)
+        if [[ -z $ru ]]; then echo "ERROR: runuser not found - run as $owner instead" >&2; return 1; fi
+        echo "(running pg_ctl as $owner)" >&2
+        "$ru" -u "$owner" -- "$PGHOME/bin/pg_ctl" "$@"
+    fi
+}
+
+__epas_ctl_mode() {   # __epas_ctl_mode [override] [action] [manager]
+    case ${1:-$EDB_CTL_MODE} in
+        systemd)      echo systemd ;;
+        pg_ctl|pgctl) echo pg_ctl ;;
+        *)
+            local mgr=${3:-}
+            if [[ ${2:-} == reload ]]; then echo pg_ctl; return 0; fi
+            [[ -n $mgr ]] || mgr=$(__epas_manager "${PGDATA:-}" "${EPAS_ACTIVE_VERSION:-}")
+            case $mgr in
+                systemd) echo systemd ;;
+                pg_ctl)  echo pg_ctl ;;
+                *)  if __epas_unit_exists "${EPAS_ACTIVE_VERSION:-}"; then echo systemd; else echo pg_ctl; fi ;;
+            esac ;;
+    esac
+}
+
+__epas_ctl() {
+    local action=$1 mode="" smode=fast smode_set=0 force=0 rc ans mgr
+    shift
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -s|--systemd)         mode=systemd ;;
+            -p|--pgctl|--pg_ctl)  mode=pg_ctl ;;
+            -f|--force)           force=1 ;;
+            smart|fast|immediate) smode=$1; smode_set=1 ;;
+            *) echo "Usage: pg$action [--systemd|--pgctl] [--force] [smart|fast|immediate]" >&2; return 2 ;;
+        esac
+        shift
+    done
+    : "${PGDATA:?PGDATA is not set - run: epas <version>}"
+    local unit="edb-as-${EPAS_ACTIVE_VERSION}.service"
+    mgr=$(__epas_manager "$PGDATA" "$EPAS_ACTIVE_VERSION")
+
+    # Nothing to do?
+    if [[ $action == start && $mgr != stopped ]]; then
+        echo "Already running (started by $(__epas_mgr_label "$mgr"))"
+        return 0
+    fi
+    if [[ $action == stop && $mgr == stopped ]]; then
+        echo "Not running - nothing to stop"
+        return 0
+    fi
+
+    mode=$(__epas_ctl_mode "$mode" "$action" "$mgr")
+
+    if [[ $mode == systemd ]]; then
+        if ! __epas_unit_exists "$EPAS_ACTIVE_VERSION"; then
+            echo "ERROR: $unit is not installed - use --pgctl" >&2; return 1
+        fi
+        # systemctl cannot stop/restart a postmaster it did not start
+        if [[ $mgr == pg_ctl && ( $action == stop || $action == restart ) ]] && (( ! force )); then
+            echo "ERROR: this cluster was started with pg_ctl, not by $unit - 'systemctl $action' would not touch it." >&2
+            echo "       Use: pg$action --pgctl   (to hand it to systemd: pgstop --pgctl; pgstart --systemd)" >&2
+            return 1
+        fi
+        (( smode_set )) && echo "NOTE: systemd uses the unit's own shutdown mode; '$smode' ignored (use --pgctl for it)" >&2
+        echo "+ systemctl $action $unit" >&2
+        __epas_root systemctl "$action" "$unit"; rc=$?
+        (( rc != 0 )) && echo "Hint: systemctl needs root/sudo rights. Alternative: pg$action --pgctl" >&2
+        echo "$unit: $(systemctl is-active "$unit" 2>/dev/null)" >&2
+        return $rc
+    fi
+
+    # pg_ctl path: right user first, so we never prompt and then fail
+    __epas_pg_ctl_check >/dev/null || return 1
+
+    # don't silently take a systemd-started cluster away from systemd
+    if [[ $mgr == systemd && $action != reload ]] && (( ! force )); then
+        echo "WARNING: this cluster was started by $unit. Using pg_ctl to $action leaves systemd out of sync." >&2
+        if [[ -t 0 ]]; then
+            read -rp "Continue with pg_ctl anyway? (y/N): " ans
+            [[ $ans =~ ^[Yy]$ ]] || return 1
+        else
+            echo "Refusing in a non-interactive shell (use --force or --systemd)." >&2; return 1
+        fi
+    fi
+
+    local logf="${EDB_PGCTL_LOG:-$PGDATA/pg_ctl_startup.log}"
+    echo "+ pg_ctl $action ($PGDATA)" >&2
+    case $action in
+        start)   __epas_pg_ctl -D "$PGDATA" -l "$logf" -w start ;;
+        stop)    __epas_pg_ctl -D "$PGDATA" -m "$smode" -w stop ;;
+        restart) __epas_pg_ctl -D "$PGDATA" -m "$smode" -l "$logf" -w restart ;;
+        reload)  __epas_pg_ctl -D "$PGDATA" reload ;;
+    esac
+}
+
+pgstart()   { __epas_ctl start   "$@"; }
+pgstop()    { __epas_ctl stop    "$@"; }
+pgrestart() { __epas_ctl restart "$@"; }
+pgreload()  { __epas_ctl reload  "$@"; }
+
+pgstatus() {
+    : "${PGDATA:?PGDATA is not set - run: epas <version>}"
+    local unit="edb-as-${EPAS_ACTIVE_VERSION}.service" mgr
+    mgr=$(__epas_manager "$PGDATA" "$EPAS_ACTIVE_VERSION")
+    echo "Started by   : $(__epas_mgr_label "$mgr")"
+    echo "Control mode : $(__epas_ctl_mode "" stop "$mgr") for stop/restart (setting: $EDB_CTL_MODE)"
+    if __epas_unit_exists "$EPAS_ACTIVE_VERSION"; then
+        echo "systemd unit : $unit -> $(systemctl is-active "$unit" 2>/dev/null) / $(systemctl is-enabled "$unit" 2>/dev/null)"
+    else
+        echo "systemd unit : $unit (not installed)"
+    fi
+    __epas_pg_ctl -D "$PGDATA" status
+}
+
+pgmode() {
+    case ${1:-} in
+        "")              echo "EDB_CTL_MODE=$EDB_CTL_MODE (effective now for stop/restart: $(__epas_ctl_mode "" stop))" ;;
+        auto|systemd)    EDB_CTL_MODE=$1; pgmode ;;
+        pg_ctl|pgctl)    EDB_CTL_MODE=pg_ctl; pgmode ;;
+        *) echo "Usage: pgmode [auto|systemd|pg_ctl]" >&2; return 2 ;;
+    esac
+}
+
+pgjournal() { journalctl -u "edb-as-${EPAS_ACTIVE_VERSION:?run: epas <version>}.service" -n "${1:-100}" --no-pager; }
+
+# ------------------------------------------------------------------------------
+# 6. CLIENT ALIASES & FILE SHORTCUTS
+# ------------------------------------------------------------------------------
+alias pgx='psql -x'
+alias pgc='psql -c'
+alias pgf='psql -f'
+alias pgdb='psql -l'
+alias pgtables='psql -c "\dt+"'
+alias pgusers='psql -c "\du+"'
+alias cdpg='cd "${PGDATA:?PGDATA is not set}"'
+alias cdbin='cd "${PGHOME:?PGHOME is not set}/bin"'
+alias epas-info='pginfo'
+alias epas-status='pgstatus'
+alias epas-logs='pgjournal'
+
+pgconf()  { ${EDITOR:-vi} "${PGDATA:?PGDATA is not set}/postgresql.conf"; }
+pghba()   { ${EDITOR:-vi} "${PGDATA:?PGDATA is not set}/pg_hba.conf"; }
+pgident() { ${EDITOR:-vi} "${PGDATA:?PGDATA is not set}/pg_ident.conf"; }
+
+# log_directory: config files first (no login needed), then the server without ever
+# prompting for a password (psql -w), else the default 'log'
+__epas_logdir() {
+    local d
+    d=$(__epas_conf_get "${PGDATA:?PGDATA is not set}" log_directory)
+    if [[ -z $d ]]; then
+        d=$(psql -XAtqw -c 'show log_directory' 2>/dev/null) || d=""
+    fi
+    [[ -z $d || $d == *$'\n'* ]] && d=log
+    if [[ $d == /* ]]; then echo "$d"; else echo "$PGDATA/$d"; fi
+}
+cdlog() { cd "$(__epas_logdir)" || return; }
+pglog() {
+    local dir f
+    dir=$(__epas_logdir) || return 1
+    f=$(ls -1t "$dir"/*.log "$dir"/*.csv 2>/dev/null | head -n1)
+    if [[ -z $f ]]; then echo "No log files in $dir" >&2; return 1; fi
+    echo "==> $f" >&2
+    tail -f "$f"
+}
+
+# ------------------------------------------------------------------------------
+# 7. TELEMETRY
+# ------------------------------------------------------------------------------
+pginfo() {
+    local os="Unknown Linux" state unit_state="not installed" pid
+    if [[ -r /etc/os-release ]]; then os=$(. /etc/os-release && echo "$PRETTY_NAME")
+    elif [[ -r /etc/redhat-release ]]; then os=$(cat /etc/redhat-release); fi
+
+    if pid=$(__epas_live_pid "$PGDATA"); then state="running (PID $pid)"
+    elif __epas_unit_active "$EPAS_ACTIVE_VERSION"; then state="running (systemd unit active)"
+    elif [[ -n $(__epas_postmaster_pids "$EPAS_ACTIVE_VERSION") ]]; then state="running (postmaster.pid not readable)"
+    else state="stopped"; fi
+
+    # Item 8: say up front when PGDATA (mode 0700) is unreadable and fallbacks apply
+    local owner view
+    owner=$(stat -c %U "$PGDATA" 2>/dev/null)
+    if [[ -z $owner ]]; then view="unknown - data directory not found"
+    elif [[ $EUID -eq 0 ]]; then view="full (root)"
+    elif [[ $(id -un) == "$owner" ]]; then view="full (owner)"
+    else view="limited - not the owner ($owner); port/state come from fallbacks"; fi
+
+    if __epas_unit_exists "$EPAS_ACTIVE_VERSION"; then
+        unit_state="edb-as-$EPAS_ACTIVE_VERSION.service: $(systemctl is-active "edb-as-$EPAS_ACTIVE_VERSION.service" 2>/dev/null) / $(systemctl is-enabled "edb-as-$EPAS_ACTIVE_VERSION.service" 2>/dev/null)"
+    fi
+
+    cat <<EOF
+======================================
+  EPAS Environment
+======================================
+Active Version : ${EPAS_ACTIVE_VERSION:-none} (${EPAS_ACTIVE_SUBVERSION:-unknown})
+View           : $view
+Binaries       : ${PGHOME:-not set}
+Data Directory : ${PGDATA:-not set}
+Port           : ${PGPORT:-not set} (${EPAS_PORT_SOURCE:-unknown})
+Instance       : $state
+systemd Unit   : $unit_state
+Started By     : $(__epas_mgr_label "$(__epas_manager "$PGDATA" "$EPAS_ACTIVE_VERSION")")
+Control Mode   : $(__epas_ctl_mode "" stop) for stop/restart (setting: $EDB_CTL_MODE)
+Client         : user=$PGUSER (${EPAS_PGUSER_SOURCE:-environment}) db=$PGDATABASE psql=$(command -v psql 2>/dev/null || echo "not found")
+--------------------------------------
+  Host
+--------------------------------------
+Hostname       : $(hostname -s 2>/dev/null)
+IP / Subnet    : $(__epas_primary_ip) / $(__epas_subnet)
+OS Release     : $os
+CPU Cores      : $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo "N/A") (load:$(uptime 2>/dev/null | awk -F'load average:' '{print $2}'))
+Memory         : total $(free -h 2>/dev/null | awk '/^Mem:/ {print $2}') | available $(free -h 2>/dev/null | awk '/^Mem:/ {print $7}')
+Last Reboot    : $(who -b 2>/dev/null | awk '{print $3, $4}')
+======================================
+EOF
+}
+
+mynet() { echo "Host: $(hostname -s 2>/dev/null) | IP: $(__epas_primary_ip) | Subnet: $(__epas_subnet)"; }
+
+pghealth() {
+    psql -X -q -P pager=off <<'SQL'
+\echo '== Server =='
+\x on
+SELECT current_setting('server_version') AS version,
+       pg_is_in_recovery()                AS standby,
+       pg_postmaster_start_time()::timestamp(0) AS started,
+       date_trunc('second', now() - pg_postmaster_start_time()) AS uptime;
+\echo '== Connections =='
+SELECT count(*) FILTER (WHERE backend_type = 'client backend')                  AS client_conns,
+       current_setting('max_connections')::int                                  AS max_conns,
+       count(*) FILTER (WHERE state = 'active' AND backend_type = 'client backend') AS active,
+       count(*) FILTER (WHERE state LIKE 'idle in transaction%')                AS idle_in_tx,
+       count(*) FILTER (WHERE wait_event_type = 'Lock')                         AS waiting_on_lock
+FROM pg_stat_activity;
+\x off
+\echo '== Databases (size, XID age) =='
+SELECT datname,
+       pg_size_pretty(pg_database_size(datname)) AS size,
+       age(datfrozenxid) AS xid_age,
+       round(100.0 * age(datfrozenxid) / current_setting('autovacuum_freeze_max_age')::int, 1) AS pct_to_forced_vacuum
+FROM pg_database
+-- Only databases this role may measure: a non-superuser PGUSER would otherwise make the
+-- whole query fail on the first database it cannot connect to (superuser: all rows)
+WHERE has_database_privilege(datname, 'CONNECT')
+   OR pg_has_role('pg_read_all_stats', 'MEMBER')
+ORDER BY pg_database_size(datname) DESC;
+\echo '== Transactions open > 5 min =='
+SELECT pid, usename, datname, date_trunc('second', now() - xact_start) AS tx_age, state,
+       left(regexp_replace(query, '\s+', ' ', 'g'), 60) AS query
+FROM pg_stat_activity
+WHERE backend_type = 'client backend' AND xact_start < now() - interval '5 minutes'
+ORDER BY xact_start LIMIT 10;
+\echo '== Replication slots =='
+SELECT slot_name, slot_type, active,
+       pg_size_pretty(pg_wal_lsn_diff(CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn()
+                                           ELSE pg_current_wal_lsn() END, restart_lsn)) AS wal_retained
+FROM pg_replication_slots;
+SQL
+}
+
+pgactivity() {
+    psql -X -P pager=off <<'SQL'
+SELECT pid, usename, datname, application_name AS app, client_addr, state,
+       wait_event_type || ':' || wait_event AS wait,
+       date_trunc('second', now() - query_start) AS runtime,
+       left(regexp_replace(query, '\s+', ' ', 'g'), 80) AS query
+FROM pg_stat_activity
+WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()
+ORDER BY query_start NULLS LAST;
+SQL
+}
+
+pglocks() {
+    psql -X -P pager=off <<'SQL'
+SELECT a.pid AS blocked_pid, a.usename, pg_blocking_pids(a.pid) AS blocked_by,
+       date_trunc('second', now() - a.query_start) AS waiting,
+       left(regexp_replace(a.query, '\s+', ' ', 'g'), 70) AS query
+FROM pg_stat_activity a
+WHERE cardinality(pg_blocking_pids(a.pid)) > 0
+ORDER BY a.query_start;
+SQL
+}
+
+pgrepl() {
+    local rec
+    rec=$(psql -XAtqc 'SELECT pg_is_in_recovery()' 2>&1) || { echo "Cannot connect (port ${PGPORT:-?}): $rec" >&2; return 1; }
+    if [[ $rec == t ]]; then
+        echo "Role: STANDBY"
+        psql -X -x -P pager=off -c "SELECT pg_last_wal_receive_lsn() AS received, pg_last_wal_replay_lsn() AS replayed,
+                                           date_trunc('second', now() - pg_last_xact_replay_timestamp()) AS replay_delay"
+        psql -X -x -P pager=off -c "SELECT status, sender_host, sender_port, slot_name, last_msg_receipt_time FROM pg_stat_wal_receiver"
+    else
+        echo "Role: PRIMARY"
+        if [[ $(psql -XAtqc 'SELECT count(*) FROM pg_stat_replication') == 0 ]]; then
+            echo "No standbys connected."
+        else
+            psql -X -x -P pager=off -c "SELECT application_name, client_addr, state, sync_state,
+                   pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS replay_lag_size,
+                   write_lag, flush_lag, replay_lag FROM pg_stat_replication"
+        fi
+    fi
+}
+
+pgsize() { du -sh "${PGDATA:?PGDATA is not set}"; }
+pgwal() {
+    local w="${PGDATA:?PGDATA is not set}/pg_wal" seg bytes size hist part bkp
+    if [[ ! -r $w ]]; then
+        echo "Cannot read $w as $(id -un) - run as the owner or root" >&2; return 1
+    fi
+    [[ -L $w ]] && echo "pg_wal -> $(readlink -f "$w")"
+    du -sh "$w/"                     # trailing '/' follows a symlinked pg_wal
+    # Real segments are exactly 24 hex characters; .history/.partial/.backup are counted apart
+    seg=$(find "$w/" -maxdepth 1 -type f -regextype posix-extended -regex '.*/[0-9A-F]{24}' 2>/dev/null | wc -l)
+    hist=$(find "$w/" -maxdepth 1 -type f -name '*.history' 2>/dev/null | wc -l)
+    part=$(find "$w/" -maxdepth 1 -type f -name '*.partial' 2>/dev/null | wc -l)
+    bkp=$(find "$w/" -maxdepth 1 -type f -name '*.backup'  2>/dev/null | wc -l)
+    # Segment size from the control file (no login needed); initdb --wal-segsize can change it
+    bytes=$("$PGHOME/bin/pg_controldata" "$PGDATA" 2>/dev/null | awk -F: '/Bytes per WAL segment/ {gsub(/ /, "", $2); print $2}')
+    if [[ $bytes =~ ^[0-9]+$ ]]; then size="$(( bytes / 1048576 ))MB each"; else size="size unknown"; fi
+    echo "WAL segments : $seg ($size)"
+    echo "Other files  : $hist .history, $part .partial, $bkp .backup"
+}
+
+# ------------------------------------------------------------------------------
+# 8. INTERACTIVE INITIALIZATION
+#    Non-interactive shells (ssh cmd, scp, cron) get the functions but no output
+#    and no automatic switch; scripts can call:  epas 17 >/dev/null
+# ------------------------------------------------------------------------------
+if [[ $- == *i* ]]; then
+    set -o ignoreeof
+    # Single quotes: evaluated at each prompt, so it follows 'epas <ver>' switches
+    PS1='[\u@\h \W][EPAS:${EPAS_ACTIVE_VERSION:-none}:${PGPORT:--}]\$ '
+    [[ -d $EDB_DEPLOYMENT_ROOT ]] || echo "WARNING: EDB_DEPLOYMENT_ROOT not found: $EDB_DEPLOYMENT_ROOT" >&2
+    # Versions are listed on every Tab, so EPAS versions installed later appear without a new login
+    __epas_complete() { COMPREPLY=($(compgen -W "$(__epas_installed_versions)" -- "${COMP_WORDS[COMP_CWORD]}")); }
+    complete -F __epas_complete epas 2>/dev/null
+    complete -W "auto systemd pg_ctl" pgmode 2>/dev/null
+    complete -W "--systemd --pgctl --force smart fast immediate" pgstart pgstop pgrestart pgreload 2>/dev/null
+    epas
+fi
