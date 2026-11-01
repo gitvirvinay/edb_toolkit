@@ -5,55 +5,35 @@
 #
 # list_epas_instances: one line per running EPAS/PostgreSQL cluster
 #   VERSION|PGDATA|PORT|PID|OWNER|MANAGED_BY
-# Works as any user; PORT may be "?" for a normal user (postmaster.pid is 0700-protected).
-# Safe to source from scripts running with set -euo pipefail.
-# A copy of this function is embedded in generate-site-env.sh (_detect_epas_instances)
-# in the build repo. Keep the two copies in sync when changing either.
-list_epas_instances() {
-    local pid args data ver port owner mgr unit line
-    local re_d='(^|[[:space:]])-D[[:space:]]*([^[:space:]]+)'
-    local re_p='(^|[[:space:]])-p[[:space:]]*([0-9]+)'
-    local -A seen=()
+#   unknown values are '?'; MANAGED_BY is systemd:<unit> or manual/pg_ctl
+# Works as any user; root and the cluster owner see the most (other users cannot
+# read inside a data directory). Safe to source from scripts using set -euo pipefail.
+#
+# The detection itself lives in lib/epas-detect.sh (one implementation for every
+# tool); this file only keeps the interface and the table output stable.
 
-    # Pass 1: postmaster processes (covers systemd- and pg_ctl-started clusters)
-    # Anchored: the program itself (argv[0]) must be the postmaster binary, so shells,
-    # sudo or pg_ctl wrappers that merely mention it in their arguments don't match
-    for pid in $(pgrep -f '^[^ ]*/bin/(edb-postmaster|edb-postgres|postmaster|postgres)( |$)' 2>/dev/null); do
-        args=$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline") || continue
-        [[ $args =~ $re_d ]] || continue
-        data=${BASH_REMATCH[2]}
-        [[ -n ${seen[$data]:-} ]] && continue
-        seen[$data]=1
-
-        # Version: from the binary path (.../asNN/bin/...), else PG_VERSION
-        if [[ ${args%% *} =~ /as([0-9]+)/bin/ ]]; then ver=${BASH_REMATCH[1]}
-        else ver=$(cat "$data/PG_VERSION" 2>/dev/null || true); fi
-
-        # Port: postmaster.pid (root/owner), else a -p on the command line
-        port=$(sed -n 4p "$data/postmaster.pid" 2>/dev/null || true)
-        if [[ -z $port && $args =~ $re_p ]]; then port=${BASH_REMATCH[2]}; fi
-
-        owner=$(ps -o user= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
-        # The cgroup tells us whether systemd started it (world-readable)
-        unit=$(grep -oE '[^/]+\.service' "/proc/$pid/cgroup" 2>/dev/null | head -n1 || true)
-        if [[ -n $unit && $unit != user@*.service && $unit != session-* ]]; then mgr="systemd:$unit"; else mgr="manual/pg_ctl"; fi
-
-        echo "${ver:-?}|$data|${port:-?}|$pid|${owner:-?}|$mgr"
-    done
-
-    # Pass 2: active units whose process we could not see (e.g. /proc mounted with hidepid)
-    if command -v systemctl &>/dev/null; then
-        for unit in $(systemctl list-units 'edb-as-*' --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}'); do
-            data=$(systemctl show -p Environment --value "$unit" 2>/dev/null | grep -oE '(^|[[:space:]])PGDATA=[^[:space:]]+' | tail -n1 || true)
-            data=${data#*PGDATA=}
-            [[ -z $data || -n ${seen[$data]:-} ]] && continue
-            seen[$data]=1
-            pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)
-            port=$(sed -n 4p "$data/postmaster.pid" 2>/dev/null || true)
-            ver=${unit//[!0-9]/}
-            echo "${ver:-?}|$data|${port:-?}|${pid:-?}|$(systemctl show -p User --value "$unit" 2>/dev/null || true)|systemd:$unit"
-        done
+# Load the shared detection library: from this checkout, else from the installed toolkit
+_lei_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lei_lib in "$_lei_dir/../lib/epas-detect.sh" "${EDB_TOOLKIT_HOME:-/opt/edb_toolkit}/lib/epas-detect.sh"; do
+    if [[ -r $_lei_lib ]]; then
+        # shellcheck source=../lib/epas-detect.sh
+        source "$_lei_lib"
+        break
     fi
+done
+unset _lei_dir _lei_lib
+if ! declare -F epas_instances >/dev/null; then
+    echo "list_epas_instances.sh: lib/epas-detect.sh not found (next to tools/ or in \${EDB_TOOLKIT_HOME:-/opt/edb_toolkit}/lib)" >&2
+    if [[ ${BASH_SOURCE[0]} == "$0" ]]; then exit 1; else return 1; fi
+fi
+
+list_epas_instances() {
+    local ver data port pid owner mgr rest
+    while IFS='|' read -r ver data port pid owner mgr rest; do
+        [[ -n $data ]] || continue
+        [[ $mgr == pg_ctl ]] && mgr="manual/pg_ctl"
+        echo "${ver:-?}|$data|${port:-?}|${pid:-?}|${owner:-?}|$mgr"
+    done < <(epas_instances)
     return 0
 }
 
@@ -72,9 +52,9 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
                   print line } }'
     if [[ $out == *'|?|'* ]]; then
         if [[ $EUID -eq 0 ]]; then
-            echo "(PORT '?' = no postmaster.pid in that data directory and no -p on the command line)" >&2
+            echo "(PORT '?' = port not found in postmaster.pid, the command line or the config files)" >&2
         else
-            echo "(PORT '?' = postmaster.pid not readable as $(id -un); run as root or the DB owner)" >&2
+            echo "(PORT '?' = data directory not readable as $(id -un); run as root or the DB owner)" >&2
         fi
     fi
     exit 0

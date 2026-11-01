@@ -6,3 +6,5 @@ conf/tde.env
 deploy.env
 config.env
 migrate.env
+# bundles built by tools/make-bundle.sh
+dist/
