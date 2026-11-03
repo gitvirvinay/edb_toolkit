@@ -24,6 +24,9 @@
 #    pgstatus                   pg_ctl status + systemd unit state
 #    pgmode [auto|systemd|pg_ctl]   default control method for this shell
 #    pghealth pgactivity pglocks pgrepl pglog pgjournal pgsize pgwal mynet
+#    psql service=<name>        connect by registry name (pg_service.conf, see 'pginfo')
+#  Prompt: [PROD as17:5444][user@host dir]$ - tag coloured by environment; EDB_PROMPT=no
+#  keeps your own prompt, NO_COLOR=1 removes the colours.
 # ==============================================================================
 
 # System-wide defaults first, so nothing below gets overridden by them
@@ -48,6 +51,12 @@ if [[ -n ${PGUSER:-} ]]; then EPAS_PGUSER_SOURCE="environment"
 else PGUSER="$(id -un)"; EPAS_PGUSER_SOURCE="OS user"; fi
 export PGUSER
 export PGDATABASE="${PGDATABASE:-edb}"           # 'edb' = Oracle-compatible mode; 'postgres' in PostgreSQL mode
+
+# Connection services generated from the cluster registry (tools/epastab.sh services):
+# 'psql service=<name>' for every EPAS version. An exported PGSYSCONFDIR still wins.
+__f=${EPASTAB:-/etc/edb/toolkit/epastab}
+if [[ -z ${PGSYSCONFDIR:-} && -r ${__f%/*}/pg_service.conf ]]; then export PGSYSCONFDIR="${__f%/*}"; fi
+unset __f
 
 # Last-resort ports: used only when the running cluster and its config files give nothing
 declare -A EPAS_PORT_MAP=( [14]=5103 [15]=5104 [16]=5105 [17]=5106 )
@@ -583,7 +592,8 @@ systemd Unit   : $unit_state
 Started By     : $(__epas_mgr_label "$(__epas_manager "$PGDATA" "$EPAS_ACTIVE_VERSION")")
 Control Mode   : $(__epas_ctl_mode "" stop) for stop/restart (setting: $EDB_CTL_MODE)
 Client         : user=$PGUSER (${EPAS_PGUSER_SOURCE:-environment}) db=$PGDATABASE psql=$(command -v psql 2>/dev/null || echo "not found")
-Detection      : ${EPAS_DETECT_SOURCE:-built-in}
+Detection      : ${EPAS_DETECT_SOURCE:-built-in}${PGSYSCONFDIR:+
+Services       : $PGSYSCONFDIR/pg_service.conf (psql service=<name>)}
 --------------------------------------
   Host
 --------------------------------------
@@ -781,8 +791,31 @@ fi
 # ------------------------------------------------------------------------------
 if [[ $- == *i* ]]; then
     set -o ignoreeof
-    # Single quotes: evaluated at each prompt, so it follows 'epas <ver>' switches
-    PS1='[\u@\h \W][EPAS:${EPAS_ACTIVE_VERSION:-none}:${PGPORT:--}]\$ '
+    # Prompt (EDB_PROMPT=no keeps your own). Evaluated at each prompt, so it follows switches.
+    #   registered cluster : [PROD as17_rpt:5445][user@host dir]$   tag coloured: PROD bold red,
+    #                        PAT amber, SIT/DEV green; the tag is always text, colour is extra
+    #   otherwise          : [user@host dir][EPAS:<ver>:<port>]$
+    #   No colour when NO_COLOR is set or TERM=dumb. \001/\002 tell readline the codes take no space.
+    __epas_ps1_pre() {
+        [[ -n ${EPAS_CLUSTER:-} ]] || return 0
+        local c=""
+        if [[ -z ${NO_COLOR:-} && ${TERM:-dumb} != dumb && -n ${EPAS_TAG:-} ]]; then
+            case $EPAS_TAG in
+                PROD)    c='\e[1;31m' ;;
+                PAT)     c='\e[33m' ;;
+                SIT|DEV) c='\e[32m' ;;
+            esac
+        fi
+        if [[ -n $c ]]; then printf '[\001%b\002%s\001%b\002 %s:%s]' "$c" "$EPAS_TAG" '\e[0m' "$EPAS_CLUSTER" "${PGPORT:--}"
+        else printf '[%s%s:%s]' "${EPAS_TAG:+$EPAS_TAG }" "$EPAS_CLUSTER" "${PGPORT:--}"; fi
+    }
+    __epas_ps1_post() {
+        [[ -z ${EPAS_CLUSTER:-} ]] || return 0
+        printf '[EPAS:%s:%s]' "${EPAS_ACTIVE_VERSION:-none}" "${PGPORT:--}"
+    }
+    if [[ ${EDB_PROMPT:-yes} != no ]]; then
+        PS1='$(__epas_ps1_pre)[\u@\h \W]$(__epas_ps1_post)\$ '
+    fi
     [[ -d $EDB_DEPLOYMENT_ROOT ]] || echo "WARNING: EDB_DEPLOYMENT_ROOT not found: $EDB_DEPLOYMENT_ROOT" >&2
     # Versions are listed on every Tab, so EPAS versions installed later appear without a new login
     __epas_complete() {

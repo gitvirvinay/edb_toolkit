@@ -16,6 +16,7 @@
 #   epastab.sh list   [--raw]
 #   epastab.sh check
 #   epastab.sh import --tag PROD [--dry-run] [--yes]
+#   epastab.sh services [--dry-run]       (re)write pg_service.conf - also automatic after add/remove/import
 #   epastab.sh init   [--env conf/site.env | --owner USER[:GROUP]] [--yes]    (root, once per host)
 #
 # File format (one line per cluster, no spaces, '#' = comment):
@@ -39,6 +40,14 @@
 # The directory, not /etc/edb itself, is delegated: /etc/edb also holds EDB
 # package files (e.g. EFM) that the database user must not be able to replace.
 # Registry path: /etc/edb/toolkit/epastab, or $EPASTAB to point at another file (tests).
+#
+# Connection service file: pg_service.conf next to the registry, generated from it
+# (never edit it). One entry per cluster, by registry name, over the Unix socket:
+#   psql service=as17_rpt        or  PGSERVICE=as17_rpt pg_dump ...
+# libpq finds it through PGSYSCONFDIR=/etc/edb/toolkit (set by epasenv and the DBA
+# .bashrc). A personal ~/.pg_service.conf is still read first. Entries you write by
+# hand go in pg_service.local.conf (same directory); it is appended unchanged.
+# Port = the registry's (declared) port; socket directory = the cluster's config.
 # =============================================================================
 set -euo pipefail
 
@@ -164,6 +173,79 @@ write_registry() {
     mv -f "$tmp" "$EPASTAB"
 }
 
+# --------------------------------------------------------------------------
+# pg_service.conf (generated from the registry; same single writer, same lock)
+# --------------------------------------------------------------------------
+service_file() { echo "$(reg_dir)/pg_service.conf"; }
+service_local_file() { echo "$(reg_dir)/pg_service.local.conf"; }
+
+# Socket directory a client should use for DATA: first absolute entry of
+# unix_socket_directories ('@' abstract sockets skipped), else /tmp (EPAS default)
+socket_dir_of() {
+    local data=$1 v d
+    local -a _dirs=()
+    v=$(epas_conf_get "$data" unix_socket_directories 2>/dev/null || true)
+    IFS=, read -ra _dirs <<< "$v"
+    for d in "${_dirs[@]+"${_dirs[@]}"}"; do
+        d=${d//[[:space:]]/}; d=${d//\'/}
+        if [[ $d == /* ]]; then echo "$d"; return 0; fi
+    done
+    echo /tmp
+}
+
+# Print the service file for the entries in E_* (to stdout)
+render_services() {
+    local i data sock local_f n
+    local_f=$(service_local_file)
+    echo "# $(service_file) - libpq connection services for this host's EPAS clusters."
+    echo "# GENERATED from $EPASTAB by edb_toolkit tools/epastab.sh - do not edit: changes are lost."
+    echo "# Own entries: $local_f (appended below). Regenerate: tools/epastab.sh services"
+    echo "# Use: psql service=<name>   (found through PGSYSCONFDIR=$(reg_dir))"
+    echo "# Generated: $(date '+%F %T') by $(id -un)"
+    for i in "${!E_NAME[@]}"; do
+        data=${E_DATA[$i]}
+        if [[ -d $data && ! -r $data ]]; then
+            log_warn "${E_NAME[$i]}: cannot read $data as $(id -un) - socket directory assumed /tmp (run as the cluster owner)" >&2
+        fi
+        sock=$(socket_dir_of "$data")
+        printf '\n# %s - EPAS %s - %s - %s\n[%s]\nhost=%s\nport=%s\ndbname=edb\n' \
+            "${E_TAG[$i]}" "${E_VER[$i]}" "$data" "$([[ ${E_SVC[$i]} == - ]] && echo pg_ctl || echo "${E_SVC[$i]}")" \
+            "${E_NAME[$i]}" "$sock" "${E_PORT[$i]}"
+    done
+    if [[ -f $local_f ]]; then
+        if [[ -r $local_f ]]; then
+            echo; echo "# ---- $local_f (hand-written, copied unchanged) ----"
+            cat "$local_f"
+            # libpq uses the first section with a name: generated entries win
+            while IFS= read -r n; do
+                if [[ -n $(find_entry "$n") ]]; then
+                    log_warn "pg_service.local.conf defines [$n], which is generated from the registry - the generated one is used" >&2
+                fi
+            done < <(sed -nE 's/^[[:space:]]*\[([^]]+)\][[:space:]]*$/\1/p' "$local_f")
+        else
+            log_warn "Cannot read $local_f as $(id -un) - not included" >&2
+        fi
+    fi
+}
+
+# Write the service file atomically (temp file + mv): a client never sees half a file.
+# Called under the registry lock.
+write_services() {
+    local f tmp
+    f=$(service_file)
+    tmp=$(mktemp "$(reg_dir)/.pg_service.XXXXXX")
+    render_services > "$tmp"
+    chmod 644 "$tmp"
+    give_to_dir_owner "$tmp"
+    mv -f "$tmp" "$f"
+    log_info "Wrote $f (${#E_NAME[@]} cluster(s))"
+}
+
+# After a registry change: the registry is already safe; a failure here only warns
+refresh_services() {
+    write_services || log_warn "Registry updated, but $(service_file) was not rewritten - run: $0 services"
+}
+
 # validate NAME VERSION DATA PORT SERVICE TAG [skip_index] -> dies with a clear reason
 validate() {
     local name=$1 ver=$2 data=$3 port=$4 svc=$5 tag=$6 skip=${7:-} i pgv
@@ -234,6 +316,7 @@ cmd_add() {
     E_NAME+=("$name") E_VER+=("$ver") E_DATA+=("$data") E_PORT+=("$port") E_SVC+=("$svc") E_TAG+=("$tag")
     write_registry
     log_audit "epastab: registered $name:$ver:$data:$port:$svc:$tag in $EPASTAB"
+    refresh_services
 }
 
 cmd_remove() {
@@ -260,6 +343,7 @@ cmd_remove() {
     E_PORT=("${E_PORT[@]}") E_SVC=("${E_SVC[@]}") E_TAG=("${E_TAG[@]}")
     write_registry
     log_audit "epastab: removed $name from $EPASTAB"
+    refresh_services
 }
 
 # STATE of a registered cluster: running | stopped | unknown (cannot tell as this user)
@@ -441,6 +525,27 @@ cmd_import() {
     done
     write_registry
     log_audit "epastab: imported ${#plan[@]} cluster(s) into $EPASTAB: ${plan[*]}"
+    refresh_services
+}
+
+cmd_services() {
+    local dry=0
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --dry-run) dry=1; shift ;;
+            *) die "services: unknown option '$1' (see --help)" ;;
+        esac
+    done
+    read_registry
+    [[ -f $EPASTAB ]] || die "No registry yet ($EPASTAB) - nothing to generate from. Start with: epastab.sh import --tag <TAG>"
+    if (( dry )); then
+        ((${#BAD_LINES[@]} == 0)) || log_warn "$EPASTAB has malformed lines (skipped): ${BAD_LINES[*]}"
+        render_services; return 0
+    fi
+    need_write_access
+    take_lock
+    read_registry
+    write_services
 }
 
 # init: one-time root setup of the registry directory, owned by the database OS user.
@@ -479,7 +584,7 @@ cmd_init() {
         confirm_or_exit "create $d owned by $user:$group, mode 755 - the database user then maintains $EPASTAB without root"
     fi
     install -d -o "$user" -g "$group" -m 755 "$d"
-    for f in "$EPASTAB" "${EPASTAB}.prev" "${EPASTAB}.lock"; do
+    for f in "$EPASTAB" "${EPASTAB}.prev" "${EPASTAB}.lock" "$(service_file)"; do
         if [[ -e $f ]]; then chown "$user:$group" "$f"; fi
     done
     log_audit "epastab: registry directory $d ready, owner $user:$group (mode 755)"
@@ -502,6 +607,7 @@ case $ACTION in
     list)   cmd_list "$@" ;;
     check)  cmd_check "$@" ;;
     import) cmd_import "$@" ;;
+    services) cmd_services "$@" ;;
     -h|--help|help|"") usage ;;
-    *) die "Unknown action '$ACTION' (init | add | remove | list | check | import; see --help)" ;;
+    *) die "Unknown action '$ACTION' (init | add | remove | list | check | import | services; see --help)" ;;
 esac

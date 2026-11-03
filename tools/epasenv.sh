@@ -18,6 +18,7 @@
 # Sets:   PGHOME PGDATA PGPORT PATH MANPATH EPAS_ACTIVE_VERSION EPAS_ACTIVE_SUBVERSION
 #         EPAS_PORT_SOURCE EPAS_CLUSTER (registry name, or 'unregistered') EPAS_TAG
 #         PGHOST = the cluster's socket directory, unset when that is /tmp or unknown
+#         PGSYSCONFDIR = the registry directory, when pg_service.conf exists there (if unset)
 # Clears: PGSERVICE (with a notice) - it could override host/port/database.
 # Keeps:  PGUSER, PGDATABASE (your deliberate choices).
 #
@@ -255,6 +256,9 @@ _epasenv_main() {
     export PGHOME="$home" PGDATA="$data" PGPORT="$port" EPAS_PORT_SOURCE="$psrc"
     export EPAS_ACTIVE_VERSION="$ver" EPAS_ACTIVE_SUBVERSION="${sub:-unknown}"
     export EPAS_CLUSTER="$name" EPAS_TAG="$tag"
+    # Connection services generated next to the registry (tools/epastab.sh services):
+    # 'psql service=<name>' works for every version. An already exported PGSYSCONFDIR wins.
+    if [[ -z ${PGSYSCONFDIR:-} && -r ${regfile%/*}/pg_service.conf ]]; then export PGSYSCONFDIR="${regfile%/*}"; fi
     if [[ -n $sock && $sock != /tmp && -d $sock ]]; then export PGHOST="$sock"; else unset PGHOST; fi
     if [[ -n ${PGSERVICE:-} ]]; then
         _epasenv_err "note: PGSERVICE=$PGSERVICE was set; cleared so psql connects to $name"
