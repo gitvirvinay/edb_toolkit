@@ -15,6 +15,8 @@
 #     is never overwritten and never copied from the source.
 #   * The previous install is kept as /opt/edb_toolkit.prev (one-step rollback).
 #   * /opt/edb_toolkit/VERSION says which toolkit version this server runs.
+#   * /usr/local/bin/epasenv -> /opt/edb_toolkit/tools/epasenv.sh, so any user can
+#     switch their shell with '. epasenv as17' (EPASENV_LINK=... to change, '' to skip).
 # =============================================================================
 set -euo pipefail
 
@@ -91,6 +93,19 @@ if [[ -d $PREFIX ]]; then
 fi
 mv "$NEW" "$PREFIX"
 trap - EXIT
+
+# '. epasenv' on every user's PATH (a root-owned link to the root-owned script)
+EPASENV_LINK="${EPASENV_LINK-/usr/local/bin/epasenv}"
+if [[ -n $EPASENV_LINK ]]; then
+    if [[ -e $EPASENV_LINK && ! -L $EPASENV_LINK ]]; then
+        log_warn "Not touching ${EPASENV_LINK}: it exists and is not a link (move it away, then re-run)"
+    elif [[ -d $(dirname "$EPASENV_LINK") ]]; then
+        ln -sfn "${PREFIX}/tools/epasenv.sh" "$EPASENV_LINK"
+        log_info "Linked ${EPASENV_LINK} -> ${PREFIX}/tools/epasenv.sh  (use: . epasenv <cluster>)"
+    else
+        log_warn "$(dirname "$EPASENV_LINK") does not exist - no epasenv link created"
+    fi
+fi
 
 log_audit "edb_toolkit ${VERSION} installed in ${PREFIX} (previous: ${CURRENT})"
 log_info "Done. Roll back with: sudo mv ${PREFIX} ${PREFIX}.bad && sudo mv ${PREFIX}.prev ${PREFIX}"

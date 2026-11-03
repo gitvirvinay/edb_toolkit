@@ -7,8 +7,14 @@
 #  The live system is read first (systemd unit, running postmaster,
 #  postmaster.pid, postgresql*.conf). The settings in section 1 are fallbacks.
 #
+#  Detection: uses the toolkit's shared library ($EDB_TOOLKIT_HOME/lib/epas-detect.sh,
+#  default /opt/edb_toolkit) when it is installed; otherwise the built-in copy in
+#  section 3 is used, so a login never depends on the toolkit. 'pginfo' shows which.
+#  Switching: with the toolkit installed, 'epas' is a shortcut to '. epasenv' (registry
+#  names like 'epas as17_rpt' work too); without it, the built-in version switcher.
+#
 #  Quick reference
-#    epas [ver]                 switch this shell to an EPAS version (default: detected)
+#    epas [ver|name|dir]        switch this shell to a cluster (default: detected)
 #    epaslist                   installed versions: instance, unit, port, data, binaries
 #    pginfo                     environment + host summary
 #    pgstart   [--systemd|--pgctl] [--force]
@@ -33,6 +39,7 @@ EDB_CTL_MODE="${EDB_CTL_MODE:-auto}"                       # auto | systemd | pg
 EDB_ENV_VERBOSE="${EDB_ENV_VERBOSE:-yes}"                  # print pginfo after switching (interactive only)
 EDB_SET_LD_LIBRARY_PATH="${EDB_SET_LD_LIBRARY_PATH:-no}"   # EPAS binaries carry their own rpath
 # EDB_PGCTL_LOG=/path/file   # pg_ctl start/restart log (default: $PGDATA/pg_ctl_startup.log)
+EDB_TOOLKIT_HOME="${EDB_TOOLKIT_HOME:-/opt/edb_toolkit}"  # installed edb_toolkit (tools/install.sh)
 
 # This .bashrc belongs to the cluster's superuser OS account, and initdb names the
 # database superuser after the OS user that ran it - so PGUSER = this OS account.
@@ -61,6 +68,8 @@ shopt -s histappend checkwinsize 2>/dev/null
 
 # ------------------------------------------------------------------------------
 # 3. INTERNAL HELPERS (detection)
+#    Built-in copy, used only when the toolkit library is not installed. When it is,
+#    section 7b points the detection helpers marked "[library]" at lib/epas-detect.sh.
 # ------------------------------------------------------------------------------
 __epas_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
 
@@ -94,8 +103,7 @@ __epas_unit_active() {
 }
 
 # Data directory from a process command line (-D <dir>)
-# SYNC: same logic in list_epas_instances.sh (operations) and generate-site-env.sh
-#       (build repo) - keep all three copies in sync when changing it.
+# [library] Built-in fallback for lib/epas-detect.sh (the tools no longer have copies).
 __epas_pid_datadir() {
     local args re='(^|[[:space:]])-D[[:space:]]*([^[:space:]]+)'
     args=$(tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline") || return 1
@@ -104,8 +112,7 @@ __epas_pid_datadir() {
 }
 
 # PIDs of postmasters started from .../asNN/bin (EPAS binary is edb-postmaster).
-# SYNC: same logic in list_epas_instances.sh (operations) and generate-site-env.sh
-#       (build repo) - keep all three copies in sync when changing it.
+# [library] Built-in fallback for lib/epas-detect.sh (the tools no longer have copies).
 # Anchored: the program itself (argv[0]) must be the postmaster binary, so shells,
 # sudo or pg_ctl wrappers that merely mention it in their arguments don't match.
 __epas_postmaster_pids() {
@@ -316,8 +323,7 @@ epas() {
 # ------------------------------------------------------------------------------
 
 # Who controls the cluster in DATA right now -> systemd | pg_ctl | stopped
-# SYNC: same logic in list_epas_instances.sh (operations) and generate-site-env.sh
-#       (build repo) - keep all three copies in sync when changing it.
+# [library] Built-in fallback for lib/epas-detect.sh (the tools no longer have copies).
 # Finds the live postmaster, then reads its cgroup (world-readable): a postmaster
 # started by systemd lives in the unit's cgroup, one started by pg_ctl does not.
 __epas_manager() {
@@ -337,6 +343,7 @@ __epas_mgr_label() {
     case $1 in
         systemd) echo "systemd (edb-as-${EPAS_ACTIVE_VERSION}.service)" ;;
         pg_ctl)  echo "pg_ctl (manual)" ;;
+        unknown) echo "unknown (cannot tell as $(id -un))" ;;
         *)       echo "not running" ;;
     esac
 }
@@ -405,6 +412,12 @@ __epas_ctl() {
     : "${PGDATA:?PGDATA is not set - run: epas <version>}"
     local unit="edb-as-${EPAS_ACTIVE_VERSION}.service"
     mgr=$(__epas_manager "$PGDATA" "$EPAS_ACTIVE_VERSION")
+
+    # Never act on a guess: as a user who cannot see inside PGDATA, running/stopped may be unknowable
+    if [[ $mgr == unknown ]]; then
+        echo "ERROR: cannot tell whether this cluster is running as $(id -un) - run as the owner of $PGDATA or root." >&2
+        return 1
+    fi
 
     # Nothing to do?
     if [[ $action == start && $mgr != stopped ]]; then
@@ -559,7 +572,8 @@ pginfo() {
 ======================================
   EPAS Environment
 ======================================
-Active Version : ${EPAS_ACTIVE_VERSION:-none} (${EPAS_ACTIVE_SUBVERSION:-unknown})
+Active Version : ${EPAS_ACTIVE_VERSION:-none} (${EPAS_ACTIVE_SUBVERSION:-unknown})${EPAS_CLUSTER:+
+Cluster        : $EPAS_CLUSTER${EPAS_TAG:+ [$EPAS_TAG]}}
 View           : $view
 Binaries       : ${PGHOME:-not set}
 Data Directory : ${PGDATA:-not set}
@@ -569,6 +583,7 @@ systemd Unit   : $unit_state
 Started By     : $(__epas_mgr_label "$(__epas_manager "$PGDATA" "$EPAS_ACTIVE_VERSION")")
 Control Mode   : $(__epas_ctl_mode "" stop) for stop/restart (setting: $EDB_CTL_MODE)
 Client         : user=$PGUSER (${EPAS_PGUSER_SOURCE:-environment}) db=$PGDATABASE psql=$(command -v psql 2>/dev/null || echo "not found")
+Detection      : ${EPAS_DETECT_SOURCE:-built-in}
 --------------------------------------
   Host
 --------------------------------------
@@ -689,6 +704,77 @@ pgwal() {
 }
 
 # ------------------------------------------------------------------------------
+# 7b. SHARED DETECTION LIBRARY (when the toolkit is installed)
+#     Loads $EDB_TOOLKIT_HOME/lib/epas-detect.sh and points the "[library]" helpers
+#     of section 3 at it. If it is missing or fails to load, the built-ins stay.
+# ------------------------------------------------------------------------------
+if [[ -e $EDB_TOOLKIT_HOME/lib/epas-detect.sh ]]; then
+    EPAS_DETECT_SOURCE="built-in (toolkit library at $EDB_TOOLKIT_HOME/lib could not be loaded)"
+else
+    EPAS_DETECT_SOURCE="built-in (no toolkit library at $EDB_TOOLKIT_HOME/lib)"
+fi
+if [[ -r $EDB_TOOLKIT_HOME/lib/epas-detect.sh ]] \
+   && source "$EDB_TOOLKIT_HOME/lib/epas-detect.sh" 2>/dev/null \
+   && declare -F epas_postmaster_pids epas_manager epas_port >/dev/null; then
+    EPAS_DETECT_SOURCE="library ${EPAS_DETECT_VERSION:-?} ($EDB_TOOLKIT_HOME)"
+
+    __epas_pid_datadir() { local d; d=$(epas_pid_datadir "$1"); [[ -n $d ]] || return 1; printf '%s\n' "$d"; }
+
+    __epas_live_pid() { local p; p=$(epas_live_pid "$1"); [[ -n $p ]] || return 1; echo "$p"; }
+
+    # postmasters of one major version (PG_VERSION, else the binary path)
+    __epas_postmaster_pids() {
+        local pid
+        for pid in $(epas_postmaster_pids); do
+            [[ $(epas_version "$(epas_pid_datadir "$pid")" "$(epas_pid_bindir "$pid")") == "$1" ]] && echo "$pid"
+        done
+        return 0
+    }
+
+    __epas_conf_get() { epas_conf_get "$1" "$2"; }
+
+    # library sources first; the port map / 5444 guesses stay a .bashrc decision
+    __epas_resolve_port() {
+        local p; p=$(epas_port "$2")
+        if [[ -n $p ]]; then echo "$p"; return; fi
+        if [[ -n ${EPAS_PORT_MAP[$1]:-} ]]; then printf '%s\tport map - fallback, verify!\n' "${EPAS_PORT_MAP[$1]}"
+        else printf '5444\tEPAS default - fallback, verify!\n'; fi
+    }
+
+    # systemd (edb-as-<ver> unit) | pg_ctl | stopped | unknown
+    __epas_manager() {
+        case $(epas_manager "$1") in
+            "systemd:edb-as-$2.service") echo systemd ;;
+            systemd:*|pg_ctl)            echo pg_ctl ;;     # another unit cannot be driven as edb-as-<ver>
+            unknown)                     echo unknown ;;
+            *)                           echo stopped ;;
+        esac
+    }
+
+    __epas_primary_ip() { epas_primary_ip; }
+    __epas_subnet()     { epas_subnet; }
+
+    # 'epas' -> '. epasenv' (registry names, data dirs, versions). The built-in switcher
+    # stays as __epas_builtin: used when epasenv cannot pick a default at login.
+    if [[ -r $EDB_TOOLKIT_HOME/tools/epasenv.sh ]]; then
+        eval "$(declare -f epas | sed '1s/^epas /__epas_builtin /')"
+        epas() {
+            if [[ $# -eq 0 ]]; then
+                if ! . "$EDB_TOOLKIT_HOME/tools/epasenv.sh" --default -q 2>/dev/null; then
+                    unset EPAS_CLUSTER EPAS_TAG
+                    __epas_builtin
+                    return
+                fi
+            else
+                . "$EDB_TOOLKIT_HOME/tools/epasenv.sh" -q "$@" || return
+            fi
+            if [[ $EDB_ENV_VERBOSE == yes && $- == *i* ]]; then pginfo; fi
+            return 0
+        }
+    fi
+fi
+
+# ------------------------------------------------------------------------------
 # 8. INTERACTIVE INITIALIZATION
 #    Non-interactive shells (ssh cmd, scp, cron) get the functions but no output
 #    and no automatic switch; scripts can call:  epas 17 >/dev/null
@@ -699,7 +785,11 @@ if [[ $- == *i* ]]; then
     PS1='[\u@\h \W][EPAS:${EPAS_ACTIVE_VERSION:-none}:${PGPORT:--}]\$ '
     [[ -d $EDB_DEPLOYMENT_ROOT ]] || echo "WARNING: EDB_DEPLOYMENT_ROOT not found: $EDB_DEPLOYMENT_ROOT" >&2
     # Versions are listed on every Tab, so EPAS versions installed later appear without a new login
-    __epas_complete() { COMPREPLY=($(compgen -W "$(__epas_installed_versions)" -- "${COMP_WORDS[COMP_CWORD]}")); }
+    __epas_complete() {
+        local words; words=$(__epas_installed_versions)
+        if declare -F epas_registry_entries >/dev/null; then words+=" $(epas_registry_entries | cut -d'|' -f1)"; fi
+        COMPREPLY=($(compgen -W "$words" -- "${COMP_WORDS[COMP_CWORD]}"))
+    }
     complete -F __epas_complete epas 2>/dev/null
     complete -W "auto systemd pg_ctl" pgmode 2>/dev/null
     complete -W "--systemd --pgctl --force smart fast immediate" pgstart pgstop pgrestart pgreload 2>/dev/null
