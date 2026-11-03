@@ -10,8 +10,8 @@
 #   --instance  choose the cluster when several are running (required when non-interactive)
 #   --force     overwrite an existing output file without asking (old copy kept as .bak_<ts>)
 #
-# Needs: lib/common.sh (sets TOOLKIT_ROOT; may provide log/warn/die/log_audit).
-#        Self-contained otherwise: instance detection is built in (_detect_epas_instances).
+# Needs: lib/common.sh (sets TOOLKIT_ROOT; may provide log/warn/die/log_audit) and
+#        lib/epas-detect.sh (the toolkit's shared, read-only cluster detection).
 #
 # ------------------------------------------------------------------------------
 # CHANGES vs generate-env.sh (2026-10-29)
@@ -19,9 +19,8 @@
 #   1. normalize_epas_version also reads stdin: the rpm and /usr/edb version fallbacks
 #      piped into it and always came back empty.
 #   2. An unusable version now reaches the FATAL message (set -e used to exit silently).
-#   3. Running clusters are found by the built-in _detect_epas_instances (same logic as the
-#      operations tool list_epas_instances.sh), which matches edb-postmaster; the old
-#      '[p]ostgres' pattern never matched EPAS.
+#   3. Running clusters are found by lib/epas-detect.sh (shared with every toolkit tool),
+#      which matches edb-postgres/edb-postmaster; the old '[p]ostgres' pattern never matched EPAS.
 #   4. Port no longer relies on 'ss -p' (root/owner only, and it missed edb-postmaster).
 #   5. Port follows server precedence: postgresql.auto.conf > conf.d/*.conf > postgresql.conf,
 #      last setting wins; 'port=5444' without spaces is accepted.
@@ -50,6 +49,10 @@
 #  19. BINARY_TOP default: the running instance's binary tree when it is relocated, else
 #      <storage root>/binary/asNN for /<root>/data/asNN layouts, else /usr/edb/asNN.
 #  20. A summary is shown and confirmed before anything is written.
+#
+# CHANGES 2026-11-02: detection moved to lib/epas-detect.sh (one implementation for all tools):
+#   the embedded copy and the own conf_port/primary_ip/subnet_of helpers are gone. Gains: clusters
+#   started without -D are found; config files follow include/include_dir like the server does.
 # ==============================================================================
 set -euo pipefail
 
@@ -59,6 +62,9 @@ source "${SCRIPT_DIR}/../../lib/common.sh"
 : "${TOOLKIT_ROOT:?lib/common.sh did not set TOOLKIT_ROOT}"
 
 # Use common.sh's helpers when it has them (change 17)
+# shellcheck source=../../lib/epas-detect.sh
+source "${SCRIPT_DIR}/../../lib/epas-detect.sh"
+
 declare -F log       >/dev/null || log()       { echo -e "\e[32m[INFO]\e[0m $*"; }
 declare -F warn      >/dev/null || warn()      { echo -e "\e[33m[WARN]\e[0m $*" >&2; }
 declare -F die       >/dev/null || die()       { echo -e "\e[31m[FATAL]\e[0m $*" >&2; exit 1; }
@@ -107,57 +113,17 @@ UNCONFIRMED=()
 # HELPERS
 # =============================================================================
 
-# Running EPAS clusters, one line each: VERSION|PGDATA|PORT|PID|OWNER|MANAGED_BY
-# Embedded copy of the operations tool list_epas_instances.sh, so this build script
-# has no external dependency. Keep the two copies in sync when changing either.
+# Running EPAS clusters, one line each: VERSION|PGDATA|PORT|PID|OWNER|MANAGED_BY|BINDIR
+# From lib/epas-detect.sh; unknown values shown as '?', pg_ctl-started as manual/pg_ctl.
 _detect_epas_instances() {
-    local pid args data ver port owner mgr unit line
-    local re_d='(^|[[:space:]])-D[[:space:]]*([^[:space:]]+)'
-    local re_p='(^|[[:space:]])-p[[:space:]]*([0-9]+)'
-    local -A seen=()
-
-    # Pass 1: postmaster processes (covers systemd- and pg_ctl-started clusters)
-    # Anchored: the program itself (argv[0]) must be the postmaster binary, so shells,
-    # sudo or pg_ctl wrappers that merely mention it in their arguments don't match
-    for pid in $(pgrep -f '^[^ ]*/bin/(edb-postmaster|edb-postgres|postmaster|postgres)( |$)' 2>/dev/null); do
-        args=$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline") || continue
-        [[ $args =~ $re_d ]] || continue
-        data=${BASH_REMATCH[2]}
-        [[ -n ${seen[$data]:-} ]] && continue
-        seen[$data]=1
-
-        # Version: from the binary path (.../asNN/bin/...), else PG_VERSION
-        if [[ ${args%% *} =~ /as([0-9]+)/bin/ ]]; then ver=${BASH_REMATCH[1]}
-        else ver=$(cat "$data/PG_VERSION" 2>/dev/null || true); fi
-
-        # Port: postmaster.pid (root/owner), else a -p on the command line
-        port=$(sed -n 4p "$data/postmaster.pid" 2>/dev/null || true)
-        if [[ -z $port && $args =~ $re_p ]]; then port=${BASH_REMATCH[2]}; fi
-
-        owner=$(ps -o user= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
-        # The cgroup tells us whether systemd started it (world-readable)
-        unit=$(grep -oE '[^/]+\.service' "/proc/$pid/cgroup" 2>/dev/null | head -n1 || true)
-        if [[ -n $unit && $unit != user@*.service && $unit != session-* ]]; then mgr="systemd:$unit"; else mgr="manual/pg_ctl"; fi
-
-        echo "${ver:-?}|$data|${port:-?}|$pid|${owner:-?}|$mgr"
-    done
-
-    # Pass 2: active units whose process we could not see (e.g. /proc mounted with hidepid)
-    if command -v systemctl &>/dev/null; then
-        for unit in $(systemctl list-units 'edb-as-*' --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}'); do
-            data=$(systemctl show -p Environment --value "$unit" 2>/dev/null | grep -oE '(^|[[:space:]])PGDATA=[^[:space:]]+' | tail -n1 || true)
-            data=${data#*PGDATA=}
-            [[ -z $data || -n ${seen[$data]:-} ]] && continue
-            seen[$data]=1
-            pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)
-            port=$(sed -n 4p "$data/postmaster.pid" 2>/dev/null || true)
-            ver=${unit//[!0-9]/}
-            echo "${ver:-?}|$data|${port:-?}|${pid:-?}|$(systemctl show -p User --value "$unit" 2>/dev/null || true)|systemd:$unit"
-        done
-    fi
+    local ver data port pid owner mgr bin _rest
+    while IFS='|' read -r ver data port pid owner mgr bin _rest; do
+        [[ -n $data ]] || continue
+        [[ $mgr == pg_ctl ]] && mgr="manual/pg_ctl"
+        echo "${ver:-?}|$data|${port:-?}|${pid:-?}|${owner:-?}|$mgr|$bin"
+    done < <(epas_instances)
     return 0
 }
-
 
 # Any version-ish string -> bare number; argument or stdin; '' if none (changes 1, 2)
 # Handles: 15 | as15 | edb-as15 | edb-as-15 | edb-as15-server | edb-as-15.service | /usr/edb/as15
@@ -170,7 +136,7 @@ normalize_epas_version() {
 # Validators (change 13) - only characters that are safe in a sourced shell file
 is_version()       { [[ $1 =~ ^[0-9]{1,3}$ ]]; }
 is_version_like()  { [[ -n $(normalize_epas_version "$1") ]]; }
-is_port()          { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+is_port()          { epas_is_valid_port "$1"; }
 is_abs_path()      { [[ $1 == /* && $1 =~ ^[A-Za-z0-9._/+-]+$ && $1 != *..* ]]; }
 is_account()       { [[ $1 =~ ^[A-Za-z_][A-Za-z0-9._-]{0,31}$ ]]; }
 is_ipv4() {
@@ -207,42 +173,14 @@ prompt_var() {
     printf -v "$var" '%s' "$input"
 }
 
-# Network (change 8)
-primary_ip() {
-    ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}' || true
-}
-subnet_of() {
-    [[ -n ${1:-} ]] || return 0
-    ip -o -4 route show proto kernel scope link src "$1" 2>/dev/null | awk '{print $1; exit}' || true
-}
-
 # Installed versions, ascending (change 12)
 installed_versions() {
-    local d
     {
-        for d in /usr/edb/as[0-9]*; do
-            if [[ -d $d ]]; then echo "${d##*/as}"; fi
-        done
+        epas_installed_versions /usr/edb
         if command -v rpm &>/dev/null; then
             rpm -qa --qf '%{NAME}\n' 'edb-as*-server' 2>/dev/null | sed -nE 's/^edb-as-?([0-9]+)-server$/\1/p'
         fi
     } | grep -E '^[0-9]+$' | sort -un || true
-}
-
-# Port from config files, in server precedence; '' if nothing readable (change 5)
-conf_port() {
-    local d=$1 f q p=""
-    local -a files=("$d/postgresql.conf")
-    if [[ -d $d/conf.d ]]; then
-        while IFS= read -r f; do files+=("$f"); done < <(ls -1 "$d"/conf.d/*.conf 2>/dev/null | sort || true)
-    fi
-    files+=("$d/postgresql.auto.conf")
-    for f in "${files[@]}"; do
-        [[ -r $f ]] || continue
-        q=$(sed -nE "s/^[[:space:]]*port[[:space:]]*=[[:space:]]*'?([0-9]+).*/\1/p" "$f" | tail -n1 || true)
-        if [[ -n $q ]]; then p=$q; fi
-    done
-    echo "$p"
 }
 
 # Ports that have a live server socket in /tmp (readable by any user)
@@ -312,7 +250,7 @@ pick_instance() {
     esac
     log "Several EPAS instances are running:"
     for i in "${!INSTANCES[@]}"; do
-        IFS='|' read -r v d p pid o m <<< "${INSTANCES[$i]}"
+        IFS='|' read -r v d p pid o m _ <<< "${INSTANCES[$i]}"
         printf '  %d) EPAS %-3s %-32s port %-5s owner %-12s %s\n' $((i + 1)) "$v" "$d" "$p" "$o" "$m"
     done
     (( INTERACTIVE )) || die "Several instances running: choose one with --instance <version|data dir>"
@@ -326,22 +264,18 @@ pick_instance() {
 }
 pick_instance
 
-DETECTED_VER="" DETECTED_DATA="" DETECTED_PORT="" DETECTED_PID="" DETECTED_OWNER="" DETECTED_MGR=""
+DETECTED_VER="" DETECTED_DATA="" DETECTED_PORT="" DETECTED_PID="" DETECTED_OWNER="" DETECTED_MGR="" DETECTED_BIN=""
 RUNNING=false
 RUN_BIN_HOME=""
 if [[ -n $SEL ]]; then
-    IFS='|' read -r DETECTED_VER DETECTED_DATA DETECTED_PORT DETECTED_PID DETECTED_OWNER DETECTED_MGR <<< "$SEL"
+    IFS='|' read -r DETECTED_VER DETECTED_DATA DETECTED_PORT DETECTED_PID DETECTED_OWNER DETECTED_MGR DETECTED_BIN <<< "$SEL"
     # '?' means "could not be read" -> treat as unknown
     DETECTED_VER=${DETECTED_VER#\?}; DETECTED_PORT=${DETECTED_PORT#\?}
     DETECTED_PID=${DETECTED_PID#\?}; DETECTED_OWNER=${DETECTED_OWNER#\?}
     RUNNING=true
     log "Using running instance: EPAS ${DETECTED_VER:-?} at ${DETECTED_DATA} (${DETECTED_MGR})"
-    # Binary tree the instance actually runs from (argv[0] is world-readable)
-    if [[ $DETECTED_PID =~ ^[0-9]+$ && -r /proc/$DETECTED_PID/cmdline ]]; then
-        argv0=$(tr '\0' '\n' 2>/dev/null < "/proc/$DETECTED_PID/cmdline" | head -n1 || true)
-        argv0=${argv0%% *}   # some process titles hold all arguments in one string
-        if [[ $argv0 == /*/bin/* ]]; then RUN_BIN_HOME=$(dirname "$(dirname "$argv0")"); fi
-    fi
+    # Binary tree the instance actually runs from (library: /proc/<pid>/exe, else the command line)
+    if [[ $DETECTED_BIN == /*/bin ]]; then RUN_BIN_HOME=$(dirname "$DETECTED_BIN"); fi
 else
     log "No running EPAS instance found - defaults come from installed packages and standard paths"
 fi
@@ -418,7 +352,8 @@ PORT_SRC=""
 if [[ -n $DETECTED_PORT ]]; then
     PORT_SRC="the running instance"
 else
-    DETECTED_PORT=$(conf_port "$DATA_TOP")
+    DETECTED_PORT=$(epas_conf_get "$DATA_TOP" port)
+    [[ $DETECTED_PORT =~ ^[0-9]+$ ]] || DETECTED_PORT=""
     if [[ -n $DETECTED_PORT ]]; then PORT_SRC="the config files in ${DATA_TOP}"; fi
 fi
 if [[ -z $DETECTED_PORT ]]; then
@@ -439,8 +374,8 @@ fi
 # =============================================================================
 # 6. NETWORK (changes 8, 14)
 # =============================================================================
-DEFAULT_IP=$(primary_ip)
-DEFAULT_CIDR=$(subnet_of "$DEFAULT_IP")
+DEFAULT_IP=$(epas_primary_ip)
+DEFAULT_CIDR=$(epas_subnet "$DEFAULT_IP")
 
 prompt_var "Enter Primary Host IP" "$DEFAULT_IP" PRIMARY_HOST is_host "IPv4 address or host name"
 prompt_var "Enter Subnet CIDR" "$DEFAULT_CIDR" SUBNET_CIDR is_cidr "e.g. 10.0.1.0/24"
