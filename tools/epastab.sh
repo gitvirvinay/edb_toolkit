@@ -45,13 +45,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/../lib/common.sh"
-# Running-instance detection (VERSION|PGDATA|PORT|PID|OWNER|MANAGED_BY)
-# shellcheck source=list_epas_instances.sh
-source "${SCRIPT_DIR}/list_epas_instances.sh"
+# Shared read-only detection: running clusters, ports, config, systemd, validation
+# shellcheck source=../lib/epas-detect.sh
+source "${SCRIPT_DIR}/../lib/epas-detect.sh"
 
 EPASTAB="${EPASTAB:-/etc/edb/toolkit/epastab}"
-TAGS="DEV SIT PAT PROD"
-NAME_RE='^as([0-9]{2})(_[a-z0-9]+)?$'
+TAGS=$EPAS_TAGS                                  # DEV SIT PAT PROD (defined in lib/epas-detect.sh)
+NAME_RE=$EPAS_NAME_RE                            # as<major>[_suffix]
 
 usage() {
     sed -n '/^# Usage:/,/^# Exit codes/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -66,45 +66,10 @@ say()   { printf '%s\n' "$*"; }
 optval() { [[ $# -ge 2 && -n ${2:-} && ${2:-} != --* ]] || die "$1 needs a value (see --help)"; }
 canon() { readlink -m -- "$1"; }          # absolute path, symlinks resolved
 
-# Port the cluster is CONFIGURED with: postgresql.conf, conf.d/*.conf (sorted),
-# postgresql.auto.conf - last setting wins, as the server reads them. '' if none.
-conf_port() {
-    local d=$1 f q p=""
-    local -a files=("$d/postgresql.conf")
-    if [[ -d $d/conf.d ]]; then
-        while IFS= read -r f; do files+=("$f"); done < <(ls -1 "$d"/conf.d/*.conf 2>/dev/null | sort || true)
-    fi
-    files+=("$d/postgresql.auto.conf")
-    for f in "${files[@]}"; do
-        [[ -r $f ]] || continue
-        q=$(sed -nE "s/^[[:space:]]*port[[:space:]]*=[[:space:]]*'?([0-9]+).*/\1/p" "$f" | tail -n1 || true)
-        if [[ -n $q ]]; then p=$q; fi
-    done
-    printf '%s' "$p"
-}
-
-# Live port of a running cluster from postmaster.pid (line 4); '' if stopped/unreadable
-live_port() {
-    local d=$1 pid
-    [[ -r $d/postmaster.pid ]] || return 0
-    pid=$(head -n1 "$d/postmaster.pid" 2>/dev/null || true)
-    if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-        sed -n 4p "$d/postmaster.pid" 2>/dev/null || true
-    fi
-}
-
-have_systemd() { command -v systemctl >/dev/null 2>&1; }
-unit_loaded()  { have_systemd && [[ $(systemctl show -p LoadState --value "$1" 2>/dev/null || true) == loaded ]]; }
-unit_pgdata() {
-    local d
-    d=$(systemctl show -p Environment --value "$1" 2>/dev/null | grep -oE '(^|[[:space:]])PGDATA=[^[:space:]]+' | tail -n1 || true)
-    printf '%s' "${d#*PGDATA=}"
-}
-
 # Default service for a cluster: edb-as-<ver> if that unit exists AND runs this data dir
 guess_service() {
     local ver=$1 data=$2 u="edb-as-$1"
-    if unit_loaded "$u" && [[ $(canon "$(unit_pgdata "$u")") == "$(canon "$data")" ]]; then
+    if epas_unit_loaded "$u" && [[ $(canon "$(epas_unit_pgdata "$u")") == "$(canon "$data")" ]]; then
         echo "$u"
     else
         echo "-"
@@ -202,9 +167,8 @@ write_registry() {
 # validate NAME VERSION DATA PORT SERVICE TAG [skip_index] -> dies with a clear reason
 validate() {
     local name=$1 ver=$2 data=$3 port=$4 svc=$5 tag=$6 skip=${7:-} i pgv
-    [[ $name =~ $NAME_RE ]] || die "Invalid name '$name': use as<major>[_suffix], e.g. as17 or as17_rpt (lowercase letters/digits)"
-    (( ${#name} <= 32 )) || die "Name '$name' is longer than 32 characters"
-    [[ ${BASH_REMATCH[1]} == "$ver" ]] || die "Name '$name' says version ${BASH_REMATCH[1]} but version is '$ver'"
+    epas_is_valid_name "$name" || die "Invalid name '$name': use as<major>[_suffix], e.g. as17 or as17_rpt (lowercase letters/digits, max 32)"
+    [[ $name =~ $NAME_RE && ${BASH_REMATCH[1]} == "$ver" ]] || die "Name '$name' says version ${BASH_REMATCH[1]:-?} but version is '$ver'"
     [[ $data == /* && $data =~ ^[A-Za-z0-9._/+-]+$ && $data != *..* ]] \
         || die "Invalid data directory '$data': absolute path, letters/digits and . _ - + / only"
     [[ -d $data ]] || die "Data directory not found: $data"
@@ -215,16 +179,16 @@ validate() {
         [[ -e $data/PG_VERSION ]] || die "$data is not a cluster (no PG_VERSION) - run initdb first"
         die "Cannot read $data/PG_VERSION as $(id -un) - run as the cluster owner or root"
     fi
-    [[ $port =~ ^[0-9]{1,5}$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || die "Invalid port '$port' (1-65535)"
+    epas_is_valid_port "$port" || die "Invalid port '$port' (1-65535)"
     [[ $svc == "-" || $svc =~ ^[A-Za-z0-9@._-]+$ ]] || die "Invalid service '$svc' (systemd unit name, or -)"
-    [[ " $TAGS " == *" $tag "* ]] || die "Invalid tag '$tag': one of $TAGS"
+    epas_is_valid_tag "$tag" || die "Invalid tag '$tag': one of $TAGS"
     for i in "${!E_NAME[@]}"; do
         [[ $i == "$skip" ]] && continue
         [[ ${E_NAME[$i]} != "$name" ]] || die "Name '$name' is already registered"
         [[ $(canon "${E_DATA[$i]}") != "$(canon "$data")" ]] || die "Data directory $data is already registered as '${E_NAME[$i]}'"
         [[ ${E_PORT[$i]} != "$port" ]] || die "Port $port is already used by '${E_NAME[$i]}'"
     done
-    if [[ $svc != "-" ]] && have_systemd && ! unit_loaded "$svc"; then
+    if [[ $svc != "-" ]] && command -v systemctl >/dev/null 2>&1 && ! epas_unit_loaded "$svc"; then
         log_warn "Service '$svc' is not installed on this host (registering anyway)"
     fi
     return 0
@@ -298,15 +262,13 @@ cmd_remove() {
     log_audit "epastab: removed $name from $EPASTAB"
 }
 
-# STATE of a registered cluster: running | stopped | unknown (not readable)
+# STATE of a registered cluster: running | stopped | unknown (cannot tell as this user)
 entry_state() {
-    local data=$1 line
-    if [[ -n $(live_port "$data") ]]; then echo running; return; fi
-    while IFS= read -r line; do
-        IFS='|' read -r _ d _ <<< "$line"
-        if [[ $(canon "$d") == "$(canon "$data")" ]]; then echo running; return; fi
-    done < <(list_epas_instances)
-    if [[ -r $data ]]; then echo stopped; else echo unknown; fi
+    case $(epas_manager "$1") in
+        systemd:*|pg_ctl) echo running ;;
+        stopped)          echo stopped ;;
+        *)                echo unknown ;;
+    esac
 }
 
 cmd_list() {
@@ -337,7 +299,7 @@ cmd_list() {
 }
 
 cmd_check() {
-    local i data ver port svc lp cp pgv state up drift=0 line d
+    local i data ver port svc lp src pgv state up drift=0 line d
     [[ $# -eq 0 ]] || die "check takes no options"
     read_registry
     if (( EUID != 0 )) && [[ $(id -un) != "$(dir_owner)" ]]; then
@@ -363,18 +325,18 @@ cmd_check() {
             say "NOTE  $d $data not readable as $(id -un) - run as the cluster owner or root for full checks"
         fi
         state=$(entry_state "$data")
-        lp=$(live_port "$data")
-        if [[ -n $lp ]]; then
-            if [[ $lp != "$port" ]]; then say "DRIFT $d running on port $lp, registry says $port"; drift=1; fi
-        else
-            cp=$(conf_port "$data")
-            if [[ -n $cp && $cp != "$port" ]]; then say "DRIFT $d configured port is $cp, registry says $port"; drift=1; fi
+        # epas_port: live port of a running cluster, else the configured one ("PORT<TAB>SOURCE")
+        IFS=$'\t' read -r lp src <<< "$(epas_port "$data")"
+        if [[ -n $lp && $lp != "$port" ]]; then
+            if [[ $src == "config files" ]]; then say "DRIFT $d configured port is $lp, registry says $port"
+            else say "DRIFT $d running on port $lp, registry says $port"; fi
+            drift=1
         fi
-        if [[ $svc != "-" ]] && have_systemd; then
-            if ! unit_loaded "$svc"; then
+        if [[ $svc != "-" ]] && command -v systemctl >/dev/null 2>&1; then
+            if ! epas_unit_loaded "$svc"; then
                 say "DRIFT $d service $svc is not installed"; drift=1
             else
-                up=$(unit_pgdata "$svc")
+                up=$(epas_unit_pgdata "$svc")
                 if [[ -n $up && $(canon "$up") != "$(canon "$data")" ]]; then
                     say "DRIFT $d service $svc runs PGDATA=$up, not $data"; drift=1
                 fi
@@ -385,13 +347,14 @@ cmd_check() {
 
     # Running clusters the registry does not know about
     while IFS= read -r line; do
-        IFS='|' read -r ver d port _ _ _ <<< "$line"
+        IFS='|' read -r ver d port _ <<< "$line"
+        [[ -n $d ]] || continue
         local known=0
         for i in "${!E_DATA[@]}"; do
             if [[ $(canon "${E_DATA[$i]}") == "$(canon "$d")" ]]; then known=1; break; fi
         done
-        if (( ! known )); then say "DRIFT running cluster not registered: version $ver, $d, port $port"; drift=1; fi
-    done < <(list_epas_instances)
+        if (( ! known )); then say "DRIFT running cluster not registered: version ${ver:-?}, $d, port ${port:-?}"; drift=1; fi
+    done < <(epas_instances)
 
     if (( drift )); then say "RESULT drift found"; return 2; fi
     say "RESULT registry matches this host"
@@ -417,15 +380,16 @@ cmd_import() {
     # Candidates: running clusters, plus installed edb-as-* units (catches stopped ones)
     local -a cand=()
     while IFS= read -r line; do
-        IFS='|' read -r ver data port pid owner mgr <<< "$line"
+        IFS='|' read -r ver data port pid owner mgr _ <<< "$line"
+        [[ -n $data ]] || continue
         svc="-"; [[ $mgr == systemd:* ]] && svc=${mgr#systemd:}; svc=${svc%.service}
         cand+=("$ver|$data|$port|$svc")
-    done < <(list_epas_instances)
-    if have_systemd; then
+    done < <(epas_instances)
+    if command -v systemctl >/dev/null 2>&1; then
         while IFS= read -r u; do
             [[ -n $u ]] || continue
             u=${u%.service}
-            data=$(unit_pgdata "$u")
+            data=$(epas_unit_pgdata "$u")
             [[ -n $data && -d $data ]] || continue
             ver=$(tr -d '[:space:]' < "$data/PG_VERSION" 2>/dev/null || true)
             cand+=("${ver:-?}|$data|?|$u")
@@ -445,8 +409,7 @@ cmd_import() {
         if [[ $ver == "?" || -z $ver ]]; then
             log_warn "Skipping $data: version unknown (run as the cluster owner or root)"; continue
         fi
-        if [[ $port == "?" || -z $port ]]; then port=$(live_port "$data"); fi
-        if [[ -z $port ]]; then port=$(conf_port "$data"); fi
+        if [[ $port == "?" || -z $port ]]; then port=$(epas_port "$data"); port=${port%%$'\t'*}; fi
         if [[ -z $port ]]; then
             log_warn "Skipping $data: port unknown (run as the cluster owner or root, or use 'add --port')"; continue
         fi
