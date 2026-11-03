@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # get-edb-inventory.sh — read-only report of the EDB / PostgreSQL software and instances on this host.
 # Finds running servers from the process table (systemd-managed or not) and reads each one's facts from the
-# server itself: data dir (/proc/<pid>/cwd), port (postmaster.pid), binaries (/proc/<pid>/exe), version, role,
-# TDE, systemd unit. Also lists EFM agents/clusters, pgBackRest and installed EDB packages.
-# Run as root for full detail (other users' /proc entries are not readable).
+# server itself: data dir, port, binaries, version, role, TDE, systemd unit (all via lib/epas-detect.sh, the
+# toolkit's shared detection). Also lists EFM agents/clusters, pgBackRest and installed EDB packages.
+# Run as root for full detail; other users get what is readable (command line, cgroup) and 'unknown' for the rest.
 # Every lookup falls back to empty/unknown: a missing tool or detail must never stop the report.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../lib/common.sh"
+# shellcheck source=../lib/epas-detect.sh
+source "${SCRIPT_DIR}/../lib/epas-detect.sh"
 
 OUTPUT=""
 usage() {
@@ -28,8 +30,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 have() { command -v "$1" >/dev/null 2>&1; }
-SERVER_NAMES="postgres edb-postgres edb-postmaster postmaster"
-is_server() { [[ " $SERVER_NAMES " == *" $1 "* ]]; }
 
 report() {
     echo "# EDB / PostgreSQL inventory of $(hostname -f 2>/dev/null || hostname) - $(date '+%F %T %Z')"
@@ -39,47 +39,42 @@ report() {
     echo "HOSTNAME=\"$(hostname -s 2>/dev/null || hostname)\""
     echo "OS=\"$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}" || echo unknown)\""
     if have ip; then
-        echo "PRIMARY_IP=\"$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}' || true)\""
+        echo "PRIMARY_IP=\"$(epas_primary_ip)\""
         echo "IP_CIDRS=\"$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | paste -sd' ' - || true)\""
     fi
     echo
 
-    # --- running servers: postmasters are server processes whose parent is not a server process ---
-    local n=0 pid ppid comm pcomm
-    while read -r pid ppid comm; do
-        is_server "$comm" || continue
-        pcomm=$(ps -o comm= -p "$ppid" 2>/dev/null || true)
-        ! is_server "$pcomm" || continue
+    # --- running servers: every postmaster, even when this user can read only part of its details ---
+    local n=0 pid
+    while read -r pid; do
+        [ -n "$pid" ] || continue
         n=$((n + 1))
-        local user data exe bin port ver role tde unit
-        user=$(ps -o user= -p "$pid" 2>/dev/null || echo unknown)
-        data=$(readlink "/proc/${pid}/cwd" 2>/dev/null || true)
-        exe=$(readlink "/proc/${pid}/exe" 2>/dev/null || true)
-        bin=${exe:+$(dirname "$exe")}
-        port=unknown; ver=unknown; role=unknown; tde=unknown
-        if [ -n "$data" ] && [ -r "${data}/postmaster.pid" ]; then
-            port=$(sed -n 4p "${data}/postmaster.pid" 2>/dev/null || echo unknown)
-            ver=$(cat "${data}/PG_VERSION" 2>/dev/null || echo unknown)
-            if [ -e "${data}/standby.signal" ]; then role=standby
-            elif [ -e "${data}/recovery.signal" ]; then role=recovery
-            else role=primary; fi
-            [ -f "${data}/pg_encryption/key.bin" ] && tde=yes || tde=no
+        local user data bin port ver role tde unit comm
+        user=$(epas_pid_owner "$pid")
+        data=$(epas_pid_datadir "$pid")
+        bin=$(epas_pid_bindir "$pid")
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+        ver=$(epas_version "$data" "$bin")
+        port=""; role=unknown; tde=unknown
+        if [ -n "$data" ]; then
+            port=$(epas_port "$data" "$pid"); port=${port%%$'\t'*}
+            role=$(epas_role "$data")
+            tde=$(epas_tde "$data")
         fi
-        unit=$(sed -n 's|.*/\([^/]*\.service\).*|\1|p' "/proc/${pid}/cgroup" 2>/dev/null | head -1 || true)
-        [[ "$unit" != user@* && "$unit" != session-* ]] || unit=""
+        unit=$(epas_pid_unit "$pid")
         echo "[INSTANCE_${n}]"
         echo "PID=\"${pid}\""
         echo "SERVICE_NAME=\"${unit%.service}\""
-        echo "VERSION=\"${ver}\""
-        echo "PRODUCT=\"$([[ "$comm" == edb-* || "$bin" == */edb/* ]] && echo EPAS || echo PostgreSQL)\""
-        echo "SYSTEM_USER=\"${user}\""
-        echo "PORT=\"${port}\""
+        echo "VERSION=\"${ver:-unknown}\""
+        echo "PRODUCT=\"$([[ "$comm" == edb-* || "$bin" == */edb/* || -x ${bin:-/nonexistent}/edb-postgres ]] && echo EPAS || echo PostgreSQL)\""
+        echo "SYSTEM_USER=\"${user:-unknown}\""
+        echo "PORT=\"${port:-unknown}\""
         echo "DATA_DIR=\"${data:-unknown}\""
         echo "BIN_DIR=\"${bin:-unknown}\""
         echo "ROLE=\"${role}\""
         echo "TDE=\"${tde}\""
         echo
-    done < <(ps -eo pid=,ppid=,comm= 2>/dev/null)
+    done < <(epas_postmaster_pids)
     [ "$n" -gt 0 ] || { echo "# No running PostgreSQL/EPAS server found."; echo; }
 
     # --- EFM ---
