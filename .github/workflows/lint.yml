@@ -7,3 +7,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y shellcheck
       - run: tests/lint.sh
+      - run: bash tests/epas-detect-unit.sh
