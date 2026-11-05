@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # epas-major-pgrestore.sh — major version upgrade by logical dump/restore (pg_dump -> pg_restore).
 # Both clusters run side by side: OLD on OLD_PORT, NEW on PRIMARY_PORT. The NEW cluster must already exist
-# (built with 01-provision/epas-base-build.sh, which also handles initdb, TDE and conf.d).
+# (built with 01-provision/epas-base-build-root.sh + epas-base-build-db.sh, which also handle initdb, TDE and conf.d).
 # The old cluster is only read, never changed.
 set -euo pipefail
 
@@ -69,7 +69,7 @@ DUMP_DIR="${DUMP_DIR:-$(dirname "$NEW_DATA")/pgrestore_${TS}}"
 for t in pg_dump pg_dumpall pg_restore psql pg_isready vacuumdb; do
     [[ -x "$NEW_BIN/$t" ]] || die "Not found: $NEW_BIN/$t (the NEW version's client tools are used for both clusters)"
 done
-[[ -f "$NEW_DATA/PG_VERSION" ]] || die "New cluster not initialised: $NEW_DATA/PG_VERSION (build it first with 01-provision/epas-base-build.sh)"
+[[ -f "$NEW_DATA/PG_VERSION" ]] || die "New cluster not initialised: $NEW_DATA/PG_VERSION (build it first with 01-provision/epas-base-build-root.sh + epas-base-build-db.sh)"
 case "$(cd "$(dirname "$DUMP_DIR")" 2>/dev/null && pwd)/" in
     /tmp/*|/var/tmp/*) die "--dump-dir must not be under /tmp or /var/tmp (dumps can be large and contain all your data)." ;;
 esac

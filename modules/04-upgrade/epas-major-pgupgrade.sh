@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # epas-major-pgupgrade.sh — major version upgrade with pg_upgrade (copy or --link mode).
-# The NEW cluster must already exist (built with 01-provision/epas-base-build.sh).
+# The NEW cluster must already exist (built with 01-provision/epas-base-build-root.sh + epas-base-build-db.sh).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +52,7 @@ EXPECTED_USER="${SYSTEM_USER}"
 [[ -x "$NEW_BIN/pg_upgrade" ]] || die "pg_upgrade not found: $NEW_BIN/pg_upgrade"
 [[ -x "$OLD_BIN/pg_ctl" ]]     || die "Old binaries not found: $OLD_BIN"
 [[ -f "$OLD_DATA/PG_VERSION" ]] || die "Old cluster not found: $OLD_DATA/PG_VERSION"
-[[ -f "$NEW_DATA/PG_VERSION" ]] || die "New cluster not initialised: $NEW_DATA/PG_VERSION (build it first with 01-provision/epas-base-build.sh)"
+[[ -f "$NEW_DATA/PG_VERSION" ]] || die "New cluster not initialised: $NEW_DATA/PG_VERSION (build it first with 01-provision/epas-base-build-root.sh + epas-base-build-db.sh)"
 
 # --- TDE detection: the wrapped key lives in <datadir>/pg_encryption/key.bin ---
 OLD_TDE=false; [[ -f "$OLD_DATA/pg_encryption/key.bin" ]] && OLD_TDE=true
@@ -127,7 +127,7 @@ UPGRADE_ARGS=(
     "--new-bindir=$NEW_BIN"
 )
 [ "$USE_LINK" = true ] && UPGRADE_ARGS+=("--link")
-# TDE: the new cluster built by epas-base-build.sh has its OWN data key, so pg_upgrade must decrypt
+# TDE: the new cluster built by epas-base-build-db.sh has its OWN data key, so pg_upgrade must decrypt
 # with the old key and re-encrypt with the new one block by block (EDB docs: --copy-by-block is
 # required when old/new clusters have different encryption settings or keys). Slower than a plain copy.
 if [[ "$OLD_TDE" == true || "$NEW_TDE" == true ]]; then

@@ -33,7 +33,8 @@ Each module has its own `README.md` with the scripts, who runs them and in which
 make env                        # creates conf/site.env and conf/tde.env from the templates
 vi conf/site.env                # versions, paths, hosts — or: modules/01-provision/generate-env.sh conf/site.env
 make lint                       # syntax/line-ending check before copying to servers
-sudo modules/01-provision/epas-base-build.sh conf/site.env
+sudo modules/01-provision/epas-base-build-root.sh --env conf/site.env                 # root part (sysadmin)
+sudo -iu enterprisedb /opt/edb_toolkit/modules/01-provision/epas-base-build-db.sh --tag SIT   # DB part, no root
 sudo modules/02-ssl/epas-ssl-setup.sh --env conf/site.env -b /tmp/bundle.pem
 ```
 
@@ -52,5 +53,6 @@ Service names come from `EPAS_VERSION` / `EFM_VERSION` (e.g. `edb-as-${EPAS_VERS
 
 - Never commit real env files or passphrases — `conf/site.env`, `conf/tde.env` are git-ignored; templates hold placeholders only.
 - Inject secrets at runtime (`export TDE_PASSPHRASE=…`, `THALES_PASS`, `OLD_TDE_PASSPHRASE`) or from a vault (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault).
+- The TDE passphrase is kept on the host only in `/etc/edb/tde/<cluster>.pass` (owner `enterprisedb`, mode 0400); `postgresql.conf` stores just the `-pass file:` path.
 - For production TDE key management use a KMIP key store (module 08) rather than file-based passphrases.
 - `.gitattributes` forces LF line endings for `*.sh`, `*.sql` and env templates — CRLF breaks bash.

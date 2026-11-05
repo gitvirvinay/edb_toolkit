@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # tde-thales-setup.sh — create a NEW TDE-encrypted EPAS cluster whose data key is wrapped by
-# Thales CipherTrust Manager (KMIP). Run it INSTEAD of the initdb step of 01-provision/epas-base-build.sh:
-#   1. this script   (KMIP client, certificates, round-trip test, initdb with Thales, start/verify/stop)
-#   2. 01-provision/epas-base-build.sh   (sees the existing cluster, skips initdb, does systemd + conf.d)
+# Thales CipherTrust Manager (KMIP). Run it INSTEAD of the initdb step of 01-provision/epas-base-build-db.sh:
+#   1. 01-provision/epas-base-build-root.sh   (root: packages, binaries, dirs, systemd drop-in)
+#   2. this script   (KMIP client, certificates, round-trip test, initdb with Thales, start/verify/stop)
+#   3. 01-provision/epas-base-build-db.sh     (as SYSTEM_USER: sees the existing cluster, skips initdb, does conf.d + registry)
 # For an existing passphrase-wrapped cluster use tde-openssl-to-thales-migrate.sh instead.
 set -euo pipefail
 umask 077
@@ -74,5 +75,5 @@ sudo -u "$SYSTEM_USER" "${BIN}/pg_ctl" -D "$DATA_TOP" -m fast -w stop >/dev/null
 [ "$TDE_VER" = "1" ] || die "TDE check returned '${TDE_VER}' (expected 1). ${UNVERIFIED}"
 
 log_audit "TDE cluster created in ${DATA_TOP} with Thales KMIP key ${THALES_KEY_UUID} (data_encryption_version=1)"
-log_info "Next: run 01-provision/epas-base-build.sh (it keeps this cluster and adds the systemd setup and conf.d), then start ${SERVICE_NAME}."
+log_info "Next: as ${SYSTEM_USER}, run 01-provision/epas-base-build-db.sh --tag <TAG> (it keeps this cluster, adds conf.d and the registry entry), then start ${SERVICE_NAME}."
 log_info "The server needs Thales reachable at every start: it unwraps the key through KMIP each time."

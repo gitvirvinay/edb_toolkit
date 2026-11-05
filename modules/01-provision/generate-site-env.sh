@@ -457,12 +457,15 @@ fi
 if [[ -z $STANDBY_HOST ]]; then
     warn "STANDBY_HOST is empty - set it in ${ENV_FILE} before configuring replication"
 fi
+if ! grep -qE '^[[:space:]]*ENV_TAG="?(DEV|SIT|PAT|PROD)"?' "$ENV_FILE"; then
+    warn "ENV_TAG is empty - set it in ${ENV_FILE} (DEV|SIT|PAT|PROD), or pass --tag to epas-base-build-db.sh"
+fi
 if (( ${#UNCONFIRMED[@]} > 0 )); then
     warn "Non-interactive run - these values were used without confirmation:"
     printf '    %s\n' "${UNCONFIRMED[@]}" >&2
     log_audit "Unconfirmed defaults in ${ENV_FILE}: ${UNCONFIRMED[*]}"
 fi
 if [[ -n $SEL ]]; then
-    warn "An existing EPAS instance was detected - review DATA_TOP/SYSTEM_USER before running epas-base-build.sh"
+    warn "An existing EPAS instance was detected - review DATA_TOP/SYSTEM_USER before running epas-base-build-root.sh / epas-base-build-db.sh"
 fi
 log_audit "Config generated: ${ENV_FILE} (EPAS ${EPAS_VERSION}, data ${DATA_TOP}, port ${PRIMARY_PORT}, run as ${RUN_AS})"

@@ -23,13 +23,14 @@ The wrapped data key lives in **`<DATA_TOP>/pg_encryption/key.bin`** (EDB docs: 
 
 ```bash
 export THALES_PASS='...'                                   # from the secrets manager
+sudo modules/01-provision/epas-base-build-root.sh          # first: packages, binaries, dirs, systemd drop-in
 sudo -E modules/08-tde/tde-thales-setup.sh                 # conf/tde.env by default
-sudo modules/01-provision/epas-base-build.sh               # then: keeps the cluster, adds systemd drop-in + conf.d
+sudo -iu enterprisedb /opt/edb_toolkit/modules/01-provision/epas-base-build-db.sh --tag PROD   # keeps the cluster: conf.d + registry
 sudo systemctl start edb-as-17
 ```
 
-It runs **instead of** the passphrase initdb in `epas-base-build.sh` (that script skips initdb when the cluster
-exists). Steps: refuses if `DATA_TOP` already holds a cluster (non-TDE → use 04-upgrade into a new TDE cluster;
+It runs **instead of** the passphrase initdb in `epas-base-build-db.sh` (that script skips initdb and the
+passphrase file when the cluster exists). Steps: refuses if `DATA_TOP` already holds a cluster (non-TDE → use 04-upgrade into a new TDE cluster;
 passphrase TDE → use the migrate script; already KMIP → nothing to do) → installs `python3-pykmip` and
 `edb-tde-kmip-client` → stages certificates and `pykmip.conf` in `DSM_DIR` → encrypts and decrypts a test value
 through Thales (**stops before initdb if that fails**) → `initdb --data-encryption=256` with the Thales

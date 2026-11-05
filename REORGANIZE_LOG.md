@@ -241,3 +241,39 @@ failing ip/systemctl/rpm/pgbackrest stubs.
 Step 2 is now complete: every script that reads the site config uses `lib/common.sh`. Two standalone helpers in
 02-ssl that take only command-line arguments and no config stay as they are: `generate-selfsigned-single.sh` and
 `tests/preflight-check.sh`.
+
+## 2026-11-04 — Day-1 build split into a root part and a database-user part
+
+### modules/01-provision: epas-base-build-root.sh + epas-base-build-db.sh
+Decisions: (1) part A runs entirely as root (sysadmin `sudo`, or Ansible `become: true`), no inner `sudo`;
+(2) TDE passphrase in a file `/etc/edb/tde/<cluster>.pass` (0400, owner SYSTEM_USER; dir 0700 made by part A;
+`/etc/edb/kmip/` kept free for Thales later); (3) names `-root` / `-db`; (4) `epas-base-build.sh` kept as a thin
+wrapper for now; (5) tag from `--tag` or `ENV_TAG` in site.env, never guessed; new `CLUSTER_NAME` (default as<ver>).
+- `epas-base-build-root.sh` (root): packages, binary move + compatibility symlink, DATA_TOP + ownership, systemd
+  drop-in, `epastab.sh init`, `/etc/edb/tde`. Re-runnable.
+- `epas-base-build-db.sh` (SYSTEM_USER): every check before any change (user, tag, name vs version, part A done,
+  registry conflicts, empty data dir, TDE commands, passphrase source/length/match) → passphrase file (atomic,
+  0400) → wrap/unwrap round trip → initdb with TDE (TDE_PASSPHRASE removed from initdb's environment) → check the
+  passphrase is not in postgresql*.conf → include_dir + conf.d templates (unchanged) → `epastab.sh add` (also
+  rewrites pg_service.conf). Existing cluster (e.g. 08-tde Thales): initdb and passphrase steps skipped.
+- Security fix: the old TDE commands used `-pass pass:${TDE_PASSPHRASE}`; initdb stores the unwrap command in
+  postgresql.conf, so the passphrase sat in plain text in every cluster, base backup and standby. Now `-pass file:`;
+  part B refuses a config that still has `pass:` (with the fix in the message). Existing clusters built with the
+  old commands still have the passphrase in their postgresql.conf.
+- Bug fixed (old script too): the "BINARY_TOP = SRC_BINARY_DIR" guard resolved the compatibility symlink, so every
+  re-run on a built host stopped there. Now it only fires when SRC_BINARY_DIR is a real directory.
+- `conf/site.env.example`: CLUSTER_NAME, ENV_TAG, TDE_PASS_DIR, TDE_PASS_FILE, `file:` TDE commands.
+  `generate-site-env.sh` warns when ENV_TAG is empty. `conf/sudoers.d/deployer.sample` marked deprecated/unsafe
+  (sudoers `*` also matches spaces: `chown -R ... /u001/data/as17*` allows `... /u001/data/as17 /etc`).
+- Docs: 01, 04-upgrade, 08-tde (order: root part → tde-thales-setup.sh → db part), top-level README.
+- Tested (sandbox as root: real enterprisedb user, real openssl, stub dnf/systemctl, fake EPAS initdb that wraps a
+  real key with PGDATAKEYWRAPCMD and records the unwrap command), 70 checks: drop-in and all six conf.d files
+  byte-identical to the old script's; passphrase file 0400 and unreadable by others; postgresql.conf has the path,
+  not the passphrase; the stored unwrap command recovers the 32-byte key as enterprisedb; refusals (root/other user,
+  no/invalid tag, legacy `pass:` config, no/short passphrase, prompt mismatch, non-empty data dir, port or name
+  already registered, wrong pass-file mode, env differs from file, broken wrap command) all leave the host
+  unchanged; re-runs of both parts; vault-dropped file; hidden prompt on a tty; existing cluster; ENV_TAG +
+  as17_rpt; wrapper end to end. `bash -n` on all scripts; shellcheck not run locally (CI runs it).
+  Not tested on a real RHEL host with real EPAS packages, systemd or real TDE.
+- Follow-up: 04-upgrade `epas-major-pgupgrade.sh` unwraps old and new keys with one command; with per-cluster
+  passphrase files that works only when both files hold the same passphrase.

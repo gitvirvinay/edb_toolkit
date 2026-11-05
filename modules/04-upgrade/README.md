@@ -15,7 +15,7 @@ sudo modules/04-upgrade/epas-major-pgupgrade.sh --root
 ```
 
 Steps: checks (versions, binaries, both clusters exist; the new one must already be built with
-`01-provision/epas-base-build.sh`) → settings summary → disk-space check (copy mode) → "verified backup taken?" →
+`01-provision/epas-base-build-root.sh + epas-base-build-db.sh`) → settings summary → disk-space check (copy mode) → "verified backup taken?" →
 TDE key commands (from `TDE_WRAP_CMD`/`TDE_UNWRAP_CMD`, or asks for the passphrase) → `pg_upgrade --check` →
 confirmation → stop both services → `pg_upgrade` → start the new service → rebuild statistics
 (`vacuumdb --all --analyze-in-stages`; pg_upgrade 14+ no longer writes `analyze_new_cluster.sh`).
@@ -24,7 +24,7 @@ If `pg_upgrade` fails after the services were stopped, the new service is **not*
 how to bring the old cluster back (copy mode: the old cluster is untouched).
 
 TDE: a cluster is treated as encrypted when `<datadir>/pg_encryption/key.bin` exists. If either cluster is
-encrypted, the script adds **`--copy-by-block`** automatically: the new cluster built by `epas-base-build.sh` has its
+encrypted, the script adds **`--copy-by-block`** automatically: the new cluster built by `epas-base-build-db.sh` has its
 own data key, so pg_upgrade decrypts each block with the old key and re-encrypts it with the new one (slower than a
 plain copy; plan the maintenance window accordingly). `--link` is refused for encrypted clusters.
 Both clusters' keys are unwrapped with the same `PGDATAKEYUNWRAPCMD` (from `TDE_UNWRAP_CMD` or the passphrase you
@@ -34,8 +34,8 @@ type), so both must have been wrapped with the same passphrase/command. See the 
 
 Use when `pg_upgrade` isn't an option: moving to a new server or OS, changing encoding/locale or TDE settings, or
 cleaning out bloat. Slower than `pg_upgrade` for large databases. Both clusters run side by side: old on `OLD_PORT`,
-new on `PRIMARY_PORT`. The new cluster must already be built with `01-provision/epas-base-build.sh` (that script
-does initdb, TDE and conf.d; this one only copies data). **The old cluster is only read, never changed.**
+new on `PRIMARY_PORT`. The new cluster must already be built with `01-provision/epas-base-build-root.sh + epas-base-build-db.sh` (those scripts
+do initdb, TDE and conf.d; this one only copies data). **The old cluster is only read, never changed.**
 
 ```bash
 # as the EPAS OS user

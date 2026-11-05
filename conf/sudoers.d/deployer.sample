@@ -1,4 +1,12 @@
 # /etc/sudoers.d/90-db-deployer
+#
+# DEPRECATED - DO NOT INSTALL (2026-11-04).
+# The Day-1 build is now epas-base-build-root.sh (run as root by a sysadmin or automation) +
+# epas-base-build-db.sh (run as enterprisedb, no sudo), so this whitelist is no longer needed.
+# It is also unsafe: in sudoers a '*' matches spaces too, so a rule such as
+#   /usr/bin/chown -R enterprisedb\:enterprisedb /u001/data/as17*
+# also allows 'chown -R enterprisedb:enterprisedb /u001/data/as17 /etc' - i.e. root.
+# Kept only for reference; it will be removed with the epas-base-build.sh wrapper.
 
 
 
