@@ -1,0 +1,50 @@
+# Sudoers rules for EPAS automation - lets the database OS user (enterprisedb) control the
+# EPAS and EFM services without a password, and nothing else.
+# Install (root):   sudo install -m 0440 conf/sudoers.d/epas-automation /etc/sudoers.d/epas-automation
+# Validate:         sudo visudo -c -f /etc/sudoers.d/epas-automation
+#
+# sudo compares the arguments LITERALLY: 'systemctl restart edb-as-17' and
+# 'systemctl restart edb-as-17.service' are two different commands. The toolkit scripts use the
+# short form, the DBA .bashrc (pgstart/pgstop/pgrestart) the '.service' form - both are listed.
+# Keep only the versions installed on the host (an unused line is harmless, but tidier gone).
+
+# SSL passphrase support via systemd-ask-password
+enterprisedb ALL=(root) NOPASSWD: /bin/systemd-ask-password
+
+# EPAS service control (versions 15, 16, 17)
+Cmnd_Alias EPAS_CTL = \
+    /bin/systemctl start edb-as-15,   /bin/systemctl start edb-as-15.service, \
+    /bin/systemctl stop edb-as-15,    /bin/systemctl stop edb-as-15.service, \
+    /bin/systemctl restart edb-as-15, /bin/systemctl restart edb-as-15.service, \
+    /bin/systemctl reload edb-as-15,  /bin/systemctl reload edb-as-15.service, \
+    /bin/systemctl start edb-as-16,   /bin/systemctl start edb-as-16.service, \
+    /bin/systemctl stop edb-as-16,    /bin/systemctl stop edb-as-16.service, \
+    /bin/systemctl restart edb-as-16, /bin/systemctl restart edb-as-16.service, \
+    /bin/systemctl reload edb-as-16,  /bin/systemctl reload edb-as-16.service, \
+    /bin/systemctl start edb-as-17,   /bin/systemctl start edb-as-17.service, \
+    /bin/systemctl stop edb-as-17,    /bin/systemctl stop edb-as-17.service, \
+    /bin/systemctl restart edb-as-17, /bin/systemctl restart edb-as-17.service, \
+    /bin/systemctl reload edb-as-17,  /bin/systemctl reload edb-as-17.service
+enterprisedb ALL=(root) NOPASSWD: EPAS_CTL
+
+# EFM service control (explicit targets - no wildcards, which would allow privilege escalation).
+# Why enterprisedb and not the efm user: the AGENT runs as 'efm' and gets its failover rights from EFM's own
+# sudoers file (installed by the EFM package). These lines are for the DBA tooling, which runs as enterprisedb:
+# 03-patching stops (and disables) the agent on a node BEFORE patching it - otherwise EFM sees the database go
+# down and fails over in the middle of the maintenance - and enables/starts it again afterwards.
+# enable/disable: EFM must not start on its own after a reboot until the node has been checked.
+# (EPAS itself is only stopped/started by 03-patching and stays enabled.)
+Cmnd_Alias EFM_CTL = \
+    /bin/systemctl start edb-efm-5.3,   /bin/systemctl start edb-efm-5.3.service, \
+    /bin/systemctl stop edb-efm-5.3,    /bin/systemctl stop edb-efm-5.3.service, \
+    /bin/systemctl restart edb-efm-5.3, /bin/systemctl restart edb-efm-5.3.service, \
+    /bin/systemctl enable edb-efm-5.3,  /bin/systemctl enable edb-efm-5.3.service, \
+    /bin/systemctl disable edb-efm-5.3, /bin/systemctl disable edb-efm-5.3.service
+enterprisedb ALL=(root) NOPASSWD: EFM_CTL
+
+# EFM status (read-only), used by 03-patching to check the cluster after a node rejoins.
+# Literal arguments: one line per EFM cluster name (default "efm"; see EFM_CLUSTER_NAME in conf/site.env).
+enterprisedb ALL=(root) NOPASSWD: /usr/edb/efm-5.3/bin/efm cluster-status efm
+
+# pgBackRest
+enterprisedb ALL=(root) NOPASSWD: /usr/bin/pgbackrest
