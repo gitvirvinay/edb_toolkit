@@ -2,7 +2,7 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
-## Unreleased
+## v1.1.0 - 2026-11-12
 
 - **Toolkit logs moved out of `/var/log`.** Each script run now writes its own file in
   `<LOG_MOUNT>/toolkit` (`/pglog/toolkit`; change it with `TOOLKIT_LOG_DIR` in `site.env`).
