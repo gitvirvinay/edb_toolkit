@@ -38,6 +38,8 @@ echo "== Parents the toolkit may hand to the DB user"
 epas_layout_parent_ok /pgdata/as17;        eq "/pgdata ok"               0 $?
 epas_layout_parent_ok /u001/data/as17;     eq "/u001/data ok"            0 $?
 epas_layout_parent_ok /var/lib/edb/as17;   eq "/var/lib/edb ok"          0 $?
+epas_layout_parent_ok /pglog/toolkit;      eq "toolkit log dir on the log mount ok"  0 $?
+epas_layout_parent_ok /var/log/edb-toolkit; eq "toolkit log dir in /var/log refused" 1 $?
 epas_layout_parent_ok /as17;               eq "/ refused"                1 $?
 epas_layout_parent_ok /var/lib/as17;       eq "/var/lib refused"         1 $?
 epas_layout_parent_ok /etc/edb/as17;       eq "/etc/... refused"         1 $?

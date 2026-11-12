@@ -9,8 +9,11 @@ What changed in edb_toolkit, newest first. Updated together with every change.
   The logger no longer uses `sudo` and no longer makes a log file writable by everyone;
   new files are mode 640.
   **Action on each server:** root creates the directory once, owned by the database OS user:
-  `install -d -o enterprisedb -g enterprisedb -m 750 /pglog/toolkit`. Until then the scripts
+  `install -d -o enterprisedb -g enterprisedb -m 2750 /pglog/toolkit`. Until then the scripts
   still run, print on the screen only, and say so.
+- `epas-base-build-root.sh` creates that directory on a new server (mode 2750: log files
+  written by a root run get the database group, so the DBA can read them). It refuses a
+  path inside a system directory such as `/var/log`.
 - Messages are copied to syslog only when `TOOLKIT_SYSLOG="yes"` (it was always on).
 - New unit tests for the logger (`tests/logger-unit.sh`, run by `make test` and CI).
 - Scripts that are run directly are now marked executable (`tools/install.sh`,
