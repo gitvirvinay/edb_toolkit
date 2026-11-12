@@ -20,6 +20,7 @@ USAGE
 parse_common_args "$@"; set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 case "${1:-}" in -h|--help) usage ;; "") ;; *) die "Unknown option: $1 (see --help)" ;; esac
 load_env required
+[ "$HA_TOOL" = "efm" ] || die "This script patches one node of an EFM cluster, but HA_TOOL=${HA_TOOL} in ${ENV_SOURCE}. For a cluster without EFM use ${SCRIPT_DIR}/epas-minor-patch-update.sh. Nothing was changed."
 require_root
 
 VIP_INTERFACE="${VIP_INTERFACE:-eth0}"

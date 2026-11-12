@@ -12,8 +12,8 @@ The tested code (02-ssl, `lib/`, unit tests, CI) is kept and moved, not rewritte
 2. **Every module has `--check` before `--apply`.** A read-only check that works on new and on
    grandfathered servers and reports OK, WARN or FAIL. Most of the estate is already built, so
    `--check` is the first thing to build: it audits servers without changing them.
-3. **A tier policy file decides what is required.** The DEV/SIT/PAT/PROD matrix becomes
-   `conf/tier-policy.env`, read by the scripts. Example: PROD refuses to build without
+3. **An environment policy file decides what is required.** The DEV/SIT/PAT/PROD matrix becomes
+   `conf/environment-policy.env`, read by the scripts. Example: PROD refuses to build without
    `verify-full` or a standby; DEV accepts a self-signed certificate. One place for the rules.
 4. **Every step writes evidence.** Disk, CPU, pgbench, restore-test and failover-test results go to
    one folder per cluster, e.g. `<evidence dir>/<cluster>/<date>-<step>.txt` (outside PGDATA; exact
@@ -27,7 +27,7 @@ The tested code (02-ssl, `lib/`, unit tests, CI) is kept and moved, not rewritte
 
 | Phase | Module | Content | From | Status 2026-11-09 |
 |---|---|---|---|---|
-| Decide | `00-intake` | Turns the request form / kickoff answers into `site.env`, validated against the tier policy | Replaces `generate-site-env.sh` | Request form done (`docs/onboarding/`); generator detects existing servers |
+| Decide | `00-intake` | Turns the request form / kickoff answers into `site.env`, validated against the environment policy | Replaces `generate-site-env.sh` | Request form done (`docs/onboarding/`); generator detects existing servers |
 | Prepare | `01-os-baseline` | DB user and group with a fixed UID/GID, chrony, locale, SELinux/firewall checks, sudoers | Split out of 01 | Not started |
 | Prepare | `02-layout-kernel` | Mounts and ownership, huge pages, THP off, sysctl, tuned, systemd drop-in (`RequiresMountsFor`, `OOMScoreAdjust`) | New | **Mounts done** (storage folders, mount check, `RequiresMountsFor`); kernel part not started |
 | Prove | `03-baseline` | fio, pg_test_fsync, CPU governor / NUMA / steal, pgbench with and without TDE on a throwaway cluster, then cleanup | New | Not started |
@@ -48,7 +48,7 @@ The tested code (02-ssl, `lib/`, unit tests, CI) is kept and moved, not rewritte
 |---|---|
 | Storage layout: `DATA_MOUNT`/`WAL_MOUNT`/`ARCHIVE_MOUNT`/`BACKUP_MOUNT`/`LOG_MOUNT` and derived `*_TOP` per cluster | **Done** |
 | Identity: `CLUSTER_NAME=as17` (technical) plus `APP_CODE`; `conf.d/00-identity.conf` with `cluster_name = '<APP>_<ENV>_<asNN>'`, `dba.app_code`, `dba.env_tag`, `dba.cluster` | Decided |
-| `ENV_TAG` with a real value, validated against the tier policy | Partly (build part B already requires it) |
+| `ENV_TAG` with a real value, validated against the environment policy | Partly (build part B already requires it) |
 | `TOPOLOGY=standalone\|standby\|ha\|ha_dr`, `DR_HOST`, `BACKUP_HOST` | Planned |
 | `INITDB_LOCALE`, `INITDB_ENCODING`, `COLLATION_PROVIDER`, `DATA_CHECKSUMS`, `REDWOOD_COMPAT` | Planned |
 | `TDE_ENABLED=yes` by default (all tiers), `HUGE_PAGES=on` (all tiers) | Decided |
