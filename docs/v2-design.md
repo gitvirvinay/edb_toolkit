@@ -69,7 +69,7 @@ The tested code (02-ssl, `lib/`, unit tests, CI) is kept and moved, not rewritte
 ## Parked items a restructure fixes
 
 - Binaries owned by root, not by `SYSTEM_USER`.
-- ~~`lib/logger.sh`: no world-writable log file (`chmod 666`) and no `sudo` from every script.~~ Done: one file per run in `<LOG_MOUNT>/toolkit`, no sudo, syslog optional. Still open: the root build creates that directory.
+- ~~`lib/logger.sh`: no world-writable log file (`chmod 666`) and no `sudo` from every script.~~ Done: one file per run in `<LOG_MOUNT>/toolkit`, no sudo, syslog optional. The root build creates that directory (mode 2750).
 - One TDE pass file per cluster (fixes the single unwrap command in 04-upgrade).
 - Tighter sudoers for pgbackrest: specific commands, not any arguments as root.
 - `epastab.sh` on the PATH; `tools/pg_bashrc.txt` renamed and linted.

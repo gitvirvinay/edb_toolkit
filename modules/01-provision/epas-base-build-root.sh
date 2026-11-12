@@ -14,6 +14,8 @@
 #   5. cluster registry directory /etc/edb/toolkit   (tools/epastab.sh init)
 #   6. TDE passphrase directory  /etc/edb/tde        (SYSTEM_USER, mode 0700)
 #   7. SSL directory SECURITY_TOP /etc/edb/ssl        (SYSTEM_USER, mode 0700; used by 02-ssl)
+#   8. toolkit log directory TOOLKIT_LOG_DIR, default <LOG_MOUNT>/toolkit (SYSTEM_USER, mode 2750),
+#      so no toolkit script ever needs sudo to write its log (lib/logger.sh)
 #
 # Part B, epas-base-build-db.sh, then runs as SYSTEM_USER (no root): initdb with
 # TDE, conf.d templates, registry entry.
@@ -37,7 +39,8 @@ Day-1 build, part A (root): EPAS packages, binaries moved to BINARY_TOP with SRC
 compatibility symlink, storage folders (DATA_TOP, WAL_TOP, ARCHIVE_TOP, BACKUP_TOP, LOG_TOP) and
 ownership, mount check, systemd drop-in, registry directory (epastab.sh init),
 TDE passphrase directory TDE_PASS_DIR (default /etc/edb/tde, owned by SYSTEM_USER, mode 0700),
-SSL directory SECURITY_TOP (default /etc/edb/ssl, owned by SYSTEM_USER, mode 0700; skipped if it is inside DATA_TOP).
+SSL directory SECURITY_TOP (default /etc/edb/ssl, owned by SYSTEM_USER, mode 0700; skipped if it is inside DATA_TOP),
+toolkit log directory TOOLKIT_LOG_DIR (default <LOG_MOUNT>/toolkit, owned by SYSTEM_USER, mode 2750).
 Then, as SYSTEM_USER:  ${SCRIPT_DIR}/epas-base-build-db.sh --tag <DEV|SIT|PAT|PROD>
 USAGE
     exit 0
@@ -49,6 +52,8 @@ load_env required
 
 TDE_PASS_DIR="${TDE_PASS_DIR:-/etc/edb/tde}"
 SECURITY_TOP="${SECURITY_TOP:-/etc/edb/ssl}"
+TOOLKIT_LOG_DIR="$(log_dir)"                 # same rule as lib/logger.sh: TOOLKIT_LOG_DIR, else <LOG_MOUNT>/toolkit
+TOOLKIT_LOG_DIR="${TOOLKIT_LOG_DIR%/}"
 
 # ==========================================
 # SAFEGUARDS & VALIDATION
@@ -86,15 +91,20 @@ done
 for v in "${LAYOUT_SET[@]}"; do
     epas_layout_parent_ok "${!v}" || die "${v}=${!v}: its parent $(dirname "${!v}") is a system directory. Use a folder under a dedicated mount, e.g. /pgwal/${CLUSTER_NAME:-as${EPAS_VERSION}}"
 done
+# Toolkit log directory: same rules as the storage folders - a safe path, never inside a system directory.
+if [[ -n "$TOOLKIT_LOG_DIR" ]]; then
+    epas_layout_valid_path "$TOOLKIT_LOG_DIR" || die "Invalid TOOLKIT_LOG_DIR '${TOOLKIT_LOG_DIR}': absolute path, letters/digits and . _ - + / only"
+    epas_layout_parent_ok "$TOOLKIT_LOG_DIR" || die "TOOLKIT_LOG_DIR=${TOOLKIT_LOG_DIR}: its parent $(dirname "$TOOLKIT_LOG_DIR") is a system directory. Use a folder on the log mount, e.g. /pglog/toolkit"
+fi
 
 # Old layout (SSL files inside PGDATA): never create it here - initdb (part B) needs an empty DATA_TOP.
 SSL_IN_PGDATA=0
 case "$(readlink -m "$SECURITY_TOP")/" in "$(readlink -m "$DATA_TOP")"/*) SSL_IN_PGDATA=1 ;; esac
 
-show_config EPAS_VERSION SERVICE_NAME SYSTEM_USER SYSTEM_GROUP SRC_BINARY_DIR BINARY_TOP DATA_TOP WAL_TOP ARCHIVE_TOP BACKUP_TOP LOG_TOP TDE_PASS_DIR SECURITY_TOP
+show_config EPAS_VERSION SERVICE_NAME SYSTEM_USER SYSTEM_GROUP SRC_BINARY_DIR BINARY_TOP DATA_TOP WAL_TOP ARCHIVE_TOP BACKUP_TOP LOG_TOP TDE_PASS_DIR SECURITY_TOP TOOLKIT_LOG_DIR
 LAYOUT_LIST=""
 for v in "${LAYOUT_SET[@]}"; do LAYOUT_LIST+="${LAYOUT_LIST:+, }${!v}"; done
-confirm_or_exit "prepare this host for EPAS ${EPAS_VERSION} as root: install packages, move binaries to ${BINARY_TOP} (symlink ${SRC_BINARY_DIR}), create ${LAYOUT_LIST}, systemd drop-in for ${SERVICE_NAME}, registry, ${TDE_PASS_DIR} and ${SECURITY_TOP} owned by ${SYSTEM_USER}"
+confirm_or_exit "prepare this host for EPAS ${EPAS_VERSION} as root: install packages, move binaries to ${BINARY_TOP} (symlink ${SRC_BINARY_DIR}), create ${LAYOUT_LIST}, systemd drop-in for ${SERVICE_NAME}, registry, ${TDE_PASS_DIR}, ${SECURITY_TOP} and the toolkit log directory ${TOOLKIT_LOG_DIR:-<none>} owned by ${SYSTEM_USER}"
 
 log_info "START: EPAS ${EPAS_VERSION} build, part A (root)"
 PACKAGE_NAME="edb-as${EPAS_VERSION}-server"
@@ -311,7 +321,37 @@ else
     log_info "Created ${SECURITY_TOP} (owner ${SYSTEM_USER}:${SYSTEM_GROUP}, mode 700)"
 fi
 
-log_audit "Day 1 part A (root) done: EPAS ${EPAS_VERSION}, binaries ${BINARY_TOP}, storage ${LAYOUT_LIST}, service ${SERVICE_NAME}, TDE dir ${TDE_PASS_DIR}, SSL dir ${SECURITY_TOP}"
+# ==========================================
+# TOOLKIT LOG DIRECTORY (TOOLKIT_LOG_DIR, default <LOG_MOUNT>/toolkit)
+# ==========================================
+# Where every toolkit script writes its run log (lib/logger.sh). Created here once, so the scripts
+# never need sudo for logging. Owner SYSTEM_USER, mode 2750:
+#   2   = setgid: a file created here gets this directory's group, also when root creates it,
+#         so SYSTEM_USER can read the log of a root run (files are mode 640) but not change it
+#   750 = owner writes, group reads, everyone else has no access
+# Its parent must already exist (normally the log mount, handed to SYSTEM_USER above): creating
+# /pglog here on a host without that mount would put the logs on the root filesystem.
+if [[ -z "$TOOLKIT_LOG_DIR" ]]; then
+    log_warn "No toolkit log directory: LOG_MOUNT is empty and TOOLKIT_LOG_DIR is not set, so toolkit scripts print on the screen only. Set TOOLKIT_LOG_DIR in ${ENV_SOURCE} and re-run."
+elif [[ ! -d "$(dirname "$TOOLKIT_LOG_DIR")" ]]; then
+    log_warn "Toolkit log directory ${TOOLKIT_LOG_DIR} not created: its parent $(dirname "$TOOLKIT_LOG_DIR") does not exist (is the log mount there?). Toolkit scripts print on the screen only until it exists; re-run this script afterwards."
+elif [[ -d "$TOOLKIT_LOG_DIR" ]]; then
+    CUR_TLOG="$(stat -c '%U:%G %a' "$TOOLKIT_LOG_DIR")"
+    if [[ "$CUR_TLOG" == "${SYSTEM_USER}:${SYSTEM_GROUP} 2750" ]]; then
+        log_info "${TOOLKIT_LOG_DIR} already set up (owner ${SYSTEM_USER}:${SYSTEM_GROUP}, mode 2750)"
+    else
+        log_warn "${TOOLKIT_LOG_DIR} was ${CUR_TLOG}; setting ${SYSTEM_USER}:${SYSTEM_GROUP} 2750"
+        chown "${SYSTEM_USER}:${SYSTEM_GROUP}" "$TOOLKIT_LOG_DIR"
+        chmod 2750 "$TOOLKIT_LOG_DIR"
+    fi
+else
+    install -d -o "$SYSTEM_USER" -g "$SYSTEM_GROUP" -m 2750 "$TOOLKIT_LOG_DIR"
+    log_info "Created ${TOOLKIT_LOG_DIR} (owner ${SYSTEM_USER}:${SYSTEM_GROUP}, mode 2750)"
+fi
+log_init                                     # the directory may be new: open this run's log file now
+[[ -z "$(log_file)" ]] || log_info "Log of this run: $(log_file)"
+
+log_audit "Day 1 part A (root) done: EPAS ${EPAS_VERSION}, binaries ${BINARY_TOP}, storage ${LAYOUT_LIST}, service ${SERVICE_NAME}, TDE dir ${TDE_PASS_DIR}, SSL dir ${SECURITY_TOP}, toolkit logs ${TOOLKIT_LOG_DIR:-<none>}"
 
 ENV_HINT=""
 [[ -n "${ENV_FILE:-}" ]] && ENV_HINT=" --env $(readlink -f "$ENV_FILE")"
