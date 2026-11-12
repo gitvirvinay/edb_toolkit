@@ -10,6 +10,12 @@ What changed in edb_toolkit, newest first. Updated together with every change.
   `efm-rolling-minor-patch.sh` stops and points to `epas-minor-patch-update.sh`.
   Safety check: with `none`, the shutdown scripts refuse to stop EPAS if an EFM agent is
   running on the host after all.
+- **Patching safety.** The shutdown scripts no longer ignore a failed stop: if EFM or EPAS
+  cannot be stopped, or EPAS is still running afterwards, they stop with an error and write
+  no audit line. EPAS is never stopped when EFM could not be stopped and disabled first.
+- `epas-minor-patch-update.sh` refuses to run while an EFM agent is active on the host and
+  points to `efm-rolling-minor-patch.sh` (stopping EPAS under a running agent can cause a
+  failover).
 - New settings `APP_CODE`, `SITE` (`primary`, `dr`) and `BACKUP_TOOL` (`basebackup`, `barman`,
   `pgbackrest`, `none`). They are checked but not used by any script yet.
 - Every script that loads `site.env` now stops at the start, before changing anything, when

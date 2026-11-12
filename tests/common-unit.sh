@@ -31,15 +31,26 @@ while [ $# -gt 0 ]; do
 done
 exec "$@"
 FAKE
-# systemctl: 'list-units' prints the agents named in $T/agents (one unit per line); the rest is recorded.
+# systemctl:
+#   list-units        prints the agents named in $T/agents (one unit per line)
+#   is-active UNIT    exit 0 if UNIT is named in $T/active, else 3 (not recorded)
+#   anything else     is recorded; it fails (exit 1) if its text is a line of $T/fail
 cat > "$T/bin/systemctl" <<FAKE
 #!/bin/sh
 if [ "\$1" = "list-units" ]; then
     [ -f "$T/agents" ] && while read -r u; do echo "\$u loaded active running EFM agent"; done < "$T/agents"
     exit 0
 fi
+if [ "\$1" = "is-active" ]; then
+    for a in "\$@"; do unit="\$a"; done
+    [ -f "$T/active" ] && grep -qx "\$unit" "$T/active" && exit 0
+    exit 3
+fi
 echo "systemctl \$*" >> "$T/calls"
+[ -f "$T/fail" ] && grep -qx "\$*" "$T/fail" && exit 1
+exit 0
 FAKE
+printf '#!/bin/sh\necho "dnf $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/dnf"
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/pg_isready"
 printf '#!/bin/sh\necho "efm $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/efm"
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/ip"
@@ -70,7 +81,7 @@ settings() {
     env -u TOOLKIT_LOG_FILE -u HA_TOOL -u SITE -u BACKUP_TOOL -u APP_CODE \
         PATH="$T/bin:$PATH" bash -c "source '$ROOT/lib/common.sh'; ENV_FILE='$T/site.env'; load_env required; $1" 2>&1
 }
-rm -f "$T/agents"
+rm -f "$T/agents" "$T/active" "$T/fail"
 
 echo "== Settings: defaults and accepted values"
 env_file
@@ -129,7 +140,50 @@ for site in primary dr; do
     has "shutdown: names the running agent"     "an EFM agent is running on this host (edb-efm-5.3.service)" "$out"
     eq "shutdown: EPAS is NOT stopped"          "" "$(calls)"
     rm -f "$T/agents"
+
+    echo "== ${site} site: a stop that fails is not ignored"
+    env_file
+    echo "stop edb-efm-5.3" > "$T/fail"
+    out=$(run "$down"); rc=$?
+    eq "EFM stop fails: exit code 1"               "1" "$rc"
+    eq "EFM stop fails: EPAS is NOT stopped"       "systemctl stop edb-efm-5.3;" "$(calls)"
+    has "EFM stop fails: says so"                  "Could not stop edb-efm-5.3. EPAS was NOT stopped" "$out"
+    hasnt "EFM stop fails: no audit line"          "[AUDIT]" "$out"
+    echo "stop edb-as-17" > "$T/fail"
+    out=$(run "$down"); rc=$?
+    eq "EPAS stop fails: exit code 1"              "1" "$rc"
+    has "EPAS stop fails: node is not ready"       "Could not stop edb-as-17 - this node is NOT ready for maintenance" "$out"
+    has "EPAS stop fails: says EFM is already off" "edb-efm-5.3 is already stopped and disabled" "$out"
+    hasnt "EPAS stop fails: no audit line"         "[AUDIT]" "$out"
+    rm -f "$T/fail"
+    echo "edb-as-17" > "$T/active"
+    out=$(run "$down"); rc=$?
+    eq "EPAS still running after the stop: exit code 1" "1" "$rc"
+    has "EPAS still running after the stop: says so"    "edb-as-17 is still running after the stop" "$out"
+    hasnt "EPAS still running after the stop: no audit line" "[AUDIT]" "$out"
+    rm -f "$T/active"
+    out=$(run "$down"); rc=$?
+    eq "everything stops: exit code 0"             "0" "$rc"
+    has "everything stops: audit line written"     "[AUDIT]" "$out"
 done
+
+echo "== epas-minor-patch-update.sh (for a node without EFM)"
+env_file 'HA_TOOL="none"'
+echo "edb-efm-5.3.service" > "$T/agents"
+out=$(run modules/03-patching/epas-minor-patch-update.sh); rc=$?
+eq "EFM agent running: refuses (exit code 1)"      "1" "$rc"
+has "EFM agent running: names the agent"           "An EFM agent is running on this host (edb-efm-5.3.service)" "$out"
+has "EFM agent running: points to the EFM script"  "efm-rolling-minor-patch.sh" "$out"
+eq "EFM agent running: nothing is stopped"         "" "$(calls)"
+env_file 'HA_TOOL="efm"'
+out=$(run modules/03-patching/epas-minor-patch-update.sh); rc=$?
+eq "refused on an EFM node whatever HA_TOOL says"  "1" "$rc"
+eq "... and nothing is stopped"                    "" "$(calls)"
+rm -f "$T/agents"
+if [ "$(id -u)" -ne 0 ]; then
+    out=$(run modules/03-patching/epas-minor-patch-update.sh)
+    has "no agent: the EFM check passes (next stop is the root check)" "Run as root" "$out"
+fi
 
 echo "== efm-rolling-minor-patch.sh"
 env_file 'HA_TOOL="none"'

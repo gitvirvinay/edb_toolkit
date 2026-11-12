@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # patch-dr-shutdown.sh — secure a DR (cascaded standby) node before patching:
 # stop & disable EFM, then stop EPAS (it stays enabled).
+# Stops with an error, and writes no audit line, if EFM or EPAS cannot be stopped.
 # EPAS stays ENABLED: it starts by itself after the reboot (it is not the HA brain). EFM is disabled, so after a
 # reboot no agent joins the cluster before the node has been checked - patch-*-startup.sh enables it again.
 set -euo pipefail
@@ -31,12 +32,23 @@ fi
 
 log_info "Securing Cascaded Standby Node"
 if [ "$HA_TOOL" = "efm" ]; then
-    sudo systemctl stop "$EFM_SERVICE" || true
-    sudo systemctl disable "$EFM_SERVICE"
+    # A failed stop is never ignored here: with the agent still running, stopping EPAS below
+    # would look like a database failure to EFM and could cause a failover.
+    sudo systemctl stop "$EFM_SERVICE" \
+        || die "Could not stop ${EFM_SERVICE}. EPAS was NOT stopped and nothing else was changed. Check: sudo systemctl status ${EFM_SERVICE}"
+    sudo systemctl disable "$EFM_SERVICE" \
+        || die "${EFM_SERVICE} is stopped but could not be disabled (it would start again after a reboot). EPAS was NOT stopped. Check: sudo systemctl status ${EFM_SERVICE}"
 else
     log_info "HA_TOOL=none: this cluster has no failover manager - EFM steps skipped"
 fi
 
-sudo systemctl stop "$EPAS_SERVICE" || true
+if [ "$HA_TOOL" = "efm" ]; then UNDO_HINT=" ${EFM_SERVICE} is already stopped and disabled; the startup script in this folder brings the node back."; else UNDO_HINT=""; fi
+sudo systemctl stop "$EPAS_SERVICE" \
+    || die "Could not stop ${EPAS_SERVICE} - this node is NOT ready for maintenance.${UNDO_HINT} Check: sudo systemctl status ${EPAS_SERVICE}"
+# Believe the service state, not the exit code of the stop: only a stopped database is ready.
+if systemctl is-active --quiet "$EPAS_SERVICE"; then
+    die "${EPAS_SERVICE} is still running after the stop - this node is NOT ready for maintenance.${UNDO_HINT} Check: sudo systemctl status ${EPAS_SERVICE}"
+fi
+log_info "${EPAS_SERVICE} is stopped"
 if [ "$HA_TOOL" = "efm" ]; then HA_NOTE="$EFM_SERVICE"; else HA_NOTE="no EFM"; fi
 log_audit "DR standby node secured for maintenance (${EPAS_SERVICE}, ${HA_NOTE})"
