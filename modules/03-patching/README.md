@@ -24,8 +24,15 @@ Set `HA_TOOL="none"` in `conf/site.env` for a cluster that has no failover manag
 | the two `*-shutdown.sh` scripts | Skip the EFM steps and stop EPAS. They first check that no EFM agent is running on the host and stop if one is: stopping EPAS under a running agent can cause a failover. |
 | the two `*-startup.sh` scripts | Start EPAS, wait for it, skip the EFM steps. |
 | `efm-rolling-minor-patch.sh` | Stops at once and points to `epas-minor-patch-update.sh`. |
-| `epas-minor-patch-update.sh` | Unchanged: it never touched EFM. |
+| `epas-minor-patch-update.sh` | The script for these clusters. It never touches EFM, and refuses to run if an EFM agent is active on the host. |
 
 The default is `HA_TOOL="efm"`, so a config file without the setting behaves as before.
+
+## When a stop fails
+
+The shutdown scripts stop with an error, and write no audit line, when EFM or EPAS cannot be
+stopped or EPAS is still running afterwards. EPAS is never stopped if EFM could not be stopped
+and disabled first. A stop of a service that is already stopped is not an error, so the scripts
+can be run again.
 
 Typical order: DR site shutdown → patch → DR startup, then the primary site the same way.
