@@ -64,6 +64,7 @@ load_env() {
     if [ -n "$ENV_SOURCE" ]; then
         # shellcheck disable=SC1090
         source "$ENV_SOURCE"
+        log_init                                   # the log directory may come from this file
         log_info "Config loaded: ${ENV_SOURCE}"
     fi
 

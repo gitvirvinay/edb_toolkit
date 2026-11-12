@@ -11,7 +11,7 @@
 #
 # Rules this file keeps, so it is safe everywhere:
 #   * Standalone: loads nothing else. (lib/common.sh is for scripts only: it
-#     loads logger.sh, which turns on 'set -euo pipefail' and creates log dirs.)
+#     loads logger.sh, which turns on 'set -euo pipefail' and opens a log file.)
 #   * Safe in an interactive shell: changes no shell options, never exits,
 #     prints nothing when loaded.
 #   * Safe in strict scripts ('set -euo pipefail'): every function works there.

@@ -10,7 +10,7 @@ conf/                 shared configuration (one place for versions, paths, hosts
   tde.env.example       → copy to conf/tde.env    (git-ignored) — loads site.env + Thales/KMIP
   sudoers.d/            sudoers rules: automation, deployer, EPAS 14→17 upgrade
 lib/common.sh         shared start-up: --env handling, config loading, settings summary (sources lib/logger.sh)
-lib/logger.sh         central syslog/audit/file logger
+lib/logger.sh         central logger: screen + one file per run in <LOG_MOUNT>/toolkit (syslog optional)
 modules/
   01-provision/       Day-1 build (/u001 layout or symlink variant), primary prep, standby rebuild, env generator
   02-ssl/             SSL/TLS setup, self-signed single/SAN bundles, ssl.conf migration, tests/

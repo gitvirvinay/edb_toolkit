@@ -10,3 +10,4 @@ jobs:
       - run: bash tests/epas-detect-unit.sh
       - run: bash tests/epas-ssl-unit.sh
       - run: bash tests/epas-layout-unit.sh
+      - run: bash tests/logger-unit.sh
