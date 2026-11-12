@@ -14,6 +14,8 @@
 #   1. --env <file>  or  --env=<file>  or a first argument ending in .env
 #   2. conf/site.env in this repo
 #   3. none -> 'required' stops; 'optional' warns and uses built-in defaults
+# load_env also checks SITE, HA_TOOL, BACKUP_TOOL and APP_CODE (validate_settings) and stops on a
+# value outside its list.
 # Values in the config file take precedence over variables exported in the shell.
 # =============================================================================
 
@@ -79,9 +81,64 @@ load_env() {
     PRIMARY_PORT="${PRIMARY_PORT:-5444}"
     EFM_CLUSTER_NAME="${EFM_CLUSTER_NAME:-efm}"
 
+    # What this cluster is and which tools it uses (conf/site.env.example). The defaults keep a
+    # config file written before these settings existed working exactly as it did.
+    APP_CODE="${APP_CODE:-}"
+    SITE="$(_lower "${SITE:-primary}")"
+    HA_TOOL="$(_lower "${HA_TOOL:-efm}")"
+    BACKUP_TOOL="$(_lower "${BACKUP_TOOL:-basebackup}")"
+    validate_settings
+
     if [ -z "$ENV_SOURCE" ]; then
         log_warn "No conf/site.env found — using built-in defaults (EPAS ${EPAS_VERSION}, service ${SERVICE_NAME}, EFM ${EFM_VERSION}). Run 'make env' to set your real values."
     fi
+}
+
+_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# _one_of VALUE CHOICE... — 0 if VALUE is one of the choices
+_one_of() {
+    local value="$1" choice; shift
+    for choice in "$@"; do
+        if [ "$value" = "$choice" ]; then return 0; fi
+    done
+    return 1
+}
+
+# validate_settings — stop before anything is changed if a setting has a value outside its list.
+# Called by load_env. Every wrong setting is reported in one message, not one per run.
+validate_settings() {
+    local bad=()
+    _one_of "$SITE" primary dr                               || bad+=("SITE='${SITE}' (allowed: primary, dr)")
+    _one_of "$HA_TOOL" efm none                              || bad+=("HA_TOOL='${HA_TOOL}' (allowed: efm, none)")
+    _one_of "$BACKUP_TOOL" basebackup barman pgbackrest none || bad+=("BACKUP_TOOL='${BACKUP_TOOL}' (allowed: basebackup, barman, pgbackrest, none)")
+    if [ -n "$APP_CODE" ] && ! [[ "$APP_CODE" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        bad+=("APP_CODE='${APP_CODE}' (letters, digits, _ and - only)")
+    fi
+    if [ "${#bad[@]}" -gt 0 ]; then
+        die "Invalid setting(s) in ${ENV_SOURCE:-the environment}: ${bad[*]}. Nothing was changed."
+    fi
+    return 0
+}
+
+# efm_agents_running — names of the EFM agent services that are active on this host ('' = none).
+# Read-only, needs no root. edb-efm-<version> is the packaged unit, efm-<cluster> an extra cluster's.
+efm_agents_running() {
+    local units
+    units="$(systemctl list-units --type=service --state=active --no-legend --plain 'edb-efm-*' 'efm-*' 2>/dev/null | awk '{print $1}' | tr '\n' ' ')" || units=""
+    printf '%s' "${units% }"
+}
+
+# require_no_efm_agent — for HA_TOOL=none, before EPAS is stopped.
+# If an agent is running after all, the setting is wrong: EFM would see the database go down
+# and could fail over. Stop here, while nothing has been changed.
+require_no_efm_agent() {
+    local agents
+    agents="$(efm_agents_running)"
+    if [ -n "$agents" ]; then
+        die "HA_TOOL=none, but an EFM agent is running on this host (${agents}). Stopping EPAS under a running agent looks like a database failure to EFM and can cause a failover. Set HA_TOOL=\"efm\" in ${ENV_SOURCE:-the config}, or stop and disable that agent first. Nothing was changed."
+    fi
+    return 0
 }
 
 # show_config VAR...  — print the values this run will use (secrets masked)
