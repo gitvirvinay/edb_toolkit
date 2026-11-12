@@ -9,6 +9,7 @@ test:        ## unit tests (no database or root needed)
 	@bash tests/epas-detect-unit.sh
 	@bash tests/epas-ssl-unit.sh
 	@bash tests/epas-layout-unit.sh
+	@bash tests/logger-unit.sh
 env:         ## create conf/site.env and conf/tde.env from the templates (won't overwrite)
 	@cp -n conf/site.env.example conf/site.env && echo "created conf/site.env" || true
 	@cp -n conf/tde.env.example conf/tde.env && echo "created conf/tde.env" || true

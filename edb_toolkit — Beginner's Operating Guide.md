@@ -18,7 +18,7 @@ The toolkit lives in five places on a server, and each place has exactly one own
 
 Only `install.sh` changes `/opt`; only the toolkit's scripts write under `/etc/edb`; your shell reads the registry and never writes it.
 
-Every change a script makes is also written as an `[AUDIT]` line to `/var/log/edb-toolkit/deploy.log` and to syslog (tag `edb-toolkit-audit`).
+Every change a script makes is also written as an `[AUDIT]` line to that run's log file in `/pglog/toolkit/` (`TOOLKIT_LOG_DIR`), and to syslog (tag `edb-toolkit-audit`) when `TOOLKIT_SYSLOG="yes"`.
 
 **Who runs what.** Root does packages, directories, systemd and installing the toolkit. The database OS user (`enterprisedb`, called `SYSTEM_USER` in the config) does everything else: building the cluster, the registry, daily work. If a step below starts with `sudo`, it is a root step; if it starts after `sudo -iu enterprisedb`, it is a DB-user step.
 
@@ -575,6 +575,6 @@ One of these will bite on the first real server: `pgstart` / `pgstop` via system
 3. **`epastab.sh` is not on PATH.** Only `epasenv` gets a `/usr/local/bin` link. Either add a second link in `install.sh` or the `alias epastab=…` from step 3 to `pg_bashrc.txt`.
 4. **`.prev` keeps one version.** Fine if you know it (step 6.3); worth one line in the README.
 5. **The README has no "Install on a server" section** (still on the roadmap). Sections 1, 4 and 6 of this guide could be cut down into it.
-6. **Already parked, still open:** `lib/logger.sh` makes `deploy.log` world-writable (anyone can forge `[AUDIT]` lines), and clusters built with the old script have the TDE passphrase in `postgresql.conf`.
+6. **Already parked, still open:** clusters built with the old script have the TDE passphrase in `postgresql.conf`.
 
 The next roadmap step still stands: run the split build on one real non-prod server and bring back the `epastab.sh check` output. That run will also confirm the example output in this guide.
