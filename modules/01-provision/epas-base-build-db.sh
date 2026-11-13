@@ -437,6 +437,9 @@ stage_template "99-local.conf" <<'EOF'
 #   log_min_duration_statement = 500
 EOF
 
+# ---- 06-archiving.conf (WAL archiving; acts only when BACKUP_TOOL=basebackup) -----------------
+"${SCRIPT_DIR}/../06-backup/enable-wal-archiving.sh" --env "$ENV_SOURCE"
+
 # =============================================================================
 # CLUSTER REGISTRY (also rewrites /etc/edb/toolkit/pg_service.conf)
 # =============================================================================
