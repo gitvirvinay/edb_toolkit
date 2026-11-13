@@ -76,6 +76,12 @@ else
     EXEC_CMD=""
 fi
 
+# --- EFM GUARD: this script stops the old and new EPAS services. Under a running EFM agent that looks
+#     like a database failure and can cause a failover in the middle of the upgrade. Stop the EFM
+#     agents of the whole cluster first (primary, standby and witness), as you did for 14 to 17. ---
+EFM_AGENTS="$(efm_agents_running)"
+[ -z "$EFM_AGENTS" ] || die "An EFM agent is running on this host (${EFM_AGENTS}). Stop EFM on every node of this cluster before the upgrade, so EFM cannot fail over while EPAS is stopped. Nothing was changed."
+
 # --- CONNECTION CONFIG: pg_upgrade copies no config files, so the old pg_hba.conf / pg_ident.conf and
 #     SSL settings are carried after pg_upgrade. Checked NOW, before anything is stopped. ---
 OLD_SSL_ON=false
