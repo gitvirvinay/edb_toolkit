@@ -32,7 +32,45 @@ cat > "$T/bin/df" <<FAKE
 #!/bin/sh
 if [ -f "$T/df_small" ]; then printf 'Avail\n  1000\n'; else exec /bin/df "\$@"; fi
 FAKE
-for t in pg_ctl pg_isready psql; do printf '#!/bin/sh\nexit 0\n' > "$T/bin/$t"; done
+# The temporary instance is faked with a few flag files in $T:
+#   pg_running = the "postmaster" is alive      pg_ready = it accepts connections
+# Knobs a test can switch on: start_fail, instance_dies, never_ready, port_busy, still_recovery, write_fail
+cat > "$T/bin/pg_ctl" <<FAKE
+#!/bin/sh
+cmd="\$1"; shift
+echo "pg_ctl \$cmd \$*" >> "$T/calls"
+case "\$cmd" in
+  start)
+    dir=""; log=""
+    while [ \$# -gt 0 ]; do case "\$1" in -D) dir="\$2"; shift;; -l) log="\$2"; shift;; esac; shift; done
+    [ -f "$T/start_fail" ] && exit 1
+    { [ -f "\$dir/recovery.signal" ] && echo "recovery.signal"; [ -f "\$dir/backup_label" ] && echo "backup_label"
+      echo "mode=\$(stat -c %a "\$dir")"; } > "$T/start_facts"
+    if [ -f "$T/instance_dies" ]; then echo 'FATAL:  could not locate required checkpoint record' > "\$log"; exit 0; fi
+    : > "$T/pg_running"
+    { echo 'LOG:  restored log file "000000010000000000000003" from archive'
+      echo 'LOG:  restored log file "000000010000000000000004" from archive'
+      echo 'LOG:  restored log file "000000010000000000000005" from archive'
+      echo 'LOG:  redo done at 0/5000028'
+      echo 'LOG:  last completed transaction was at log time 2026-11-10 03:01:02+00'
+      echo 'LOG:  archive recovery complete'; } > "\$log"
+    [ -f "$T/never_ready" ] || : > "$T/pg_ready" ;;
+  status) [ -f "$T/pg_running" ] ;;
+  stop)   rm -f "$T/pg_running" "$T/pg_ready" ;;
+esac
+FAKE
+cat > "$T/bin/pg_isready" <<FAKE
+#!/bin/sh
+case "\$*" in *localhost*) [ -f "$T/port_busy" ] && exit 0; exit 2;; esac
+[ -f "$T/pg_ready" ] && exit 0; exit 2
+FAKE
+cat > "$T/bin/psql" <<FAKE
+#!/bin/sh
+case "\$*" in
+  *pg_is_in_recovery*) [ -f "$T/still_recovery" ] && echo t || echo f ;;
+  *restore_probe*)     [ -f "$T/write_fail" ] && { echo "ERROR: read-only transaction" >&2; exit 1; }; echo 1 ;;
+esac
+FAKE
 chmod +x "$T"/bin/*
 
 env_file() {
@@ -61,7 +99,7 @@ mkbackup() {
     [ "${2:-}" = "incomplete" ] || echo '{}' > "$T/backup/$1/backup_manifest"
     echo "datafile" > "$T/backup/$1/base/16384"
 }
-reset() { : > "$T/calls"; rm -rf "$T/backup"/* "$T/logs"/* "$T/archive"/* "$T/tde" "$T/verify_fail" "$T/df_small"; env_file 'BACKUP_TOOL="basebackup"'; }
+reset() { : > "$T/calls"; rm -rf "$T/backup"/* "$T/logs"/* "$T/archive"/* "$T/tde"; rm -f "$T/verify_fail" "$T/df_small" "$T/pg_running" "$T/pg_ready" "$T/start_fail" "$T/instance_dies" "$T/never_ready" "$T/port_busy" "$T/still_recovery" "$T/write_fail" "$T/start_facts"; env_file 'BACKUP_TOOL="basebackup"'; }
 chosen() { sed -n 's/.*Backup chosen.*: //p' <<< "$1" | head -1; }
 
 echo "== restore-test.sh: guards"
@@ -171,6 +209,54 @@ eq   "...and the kept copy is gone"                      "0" "$(find "$T/backup/
 eq   "the real backup is untouched"                      "1" "$([ -f "$T/backup/2026-11-10_020000_scheduled/backup_label" ] && echo 1 || echo 0)"
 out=$(run --check-only); rc=$?
 eq   "after clearing: tests can run again"               "0" "$rc"
+
+echo "== restore-test.sh: restore, start, replay (step 2)"
+reset; mkbackup 2026-11-10_020000_scheduled
+socks_before=$(find /tmp -maxdepth 1 -name 'edb-restore-test.*' 2>/dev/null | wc -l | tr -d ' ')
+out=$(run); rc=$?
+eq   "a good backup: the test passes"                    "0" "$rc"
+has  "says it passed"                                    "RESTORE TEST PASSED" "$out"
+has  "reports how much WAL was replayed"                 "Replayed 3 archived WAL file(s)" "$out"
+has  "the copy was made from the chosen backup"          "of_2026-11-10_020000_scheduled" "$out"
+has  "the copy looked like a restore at start: recovery.signal" "recovery.signal" "$(cat "$T/start_facts")"
+has  "the copy kept its backup_label"                    "backup_label" "$(cat "$T/start_facts")"
+has  "the copy's folder is mode 700"                     "mode=700" "$(cat "$T/start_facts")"
+has  "own port"                                          "port=55432" "$(calls)"
+has  "never archives"                                    "archive_mode=off" "$(calls)"
+has  "restore_command reads the real archive"            "restore_command='cp $T/archive/%f %p'" "$(calls)"
+has  "no standby checks"                                 "hot_standby=off" "$(calls)"
+has  "no replication"                                    "max_wal_senders=0" "$(calls)"
+eq   "the real backup was not touched (no recovery.signal in it)" "0" "$([ -e "$T/backup/2026-11-10_020000_scheduled/recovery.signal" ] && echo 1 || echo 0)"
+eq   "the temporary instance is stopped afterwards"      "0" "$([ -f "$T/pg_running" ] && echo 1 || echo 0)"
+eq   "no socket folder is left in /tmp"                  "$socks_before" "$(find /tmp -maxdepth 1 -name 'edb-restore-test.*' 2>/dev/null | wc -l | tr -d ' ')"
+has  "one audit line in the log"                         "AUDIT" "$(cat "$T"/logs/*.log 2>/dev/null)"
+
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/instance_dies"
+out=$(run); rc=$?
+eq   "instance dies during recovery: the test fails"     "1" "$rc"
+has  "says why, and shows the instance log"              "stopped before recovery finished" "$out"
+has  "shows the instance's own message"                  "could not locate required checkpoint record" "$out"
+
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/never_ready"
+out=$(RESTORE_TEST_TIMEOUT_SECS=2 RESTORE_TEST_POLL_SECS=1 run); rc=$?
+eq   "recovery never finishes: the test times out"       "1" "$rc"
+has  "says it timed out"                                 "Timed out" "$out"
+eq   "the instance is stopped after a timeout"           "0" "$([ -f "$T/pg_running" ] && echo 1 || echo 0)"
+
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/still_recovery"
+out=$(run); rc=$?
+eq   "instance still in recovery after it answered: fails" "1" "$rc"
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/write_fail"
+out=$(run); rc=$?
+eq   "instance cannot write: fails"                      "1" "$rc"
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/start_fail"
+out=$(run); rc=$?
+eq   "pg_ctl cannot start: fails"                        "1" "$rc"
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/port_busy"
+out=$(run); rc=$?
+eq   "test port already in use: refused"                 "1" "$rc"
+has  "port in use: says so"                              "already answers on port" "$out"
+eq   "port in use: nothing was copied"                   "0" "$(find "$T/backup/restore-test" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

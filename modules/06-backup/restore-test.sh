@@ -227,6 +227,119 @@ if [ "$CHECK_ONLY" = "1" ]; then
 fi
 
 # >>> RESTORE (step 2)
-log_info "All checks passed for ${BACKUP_NAME}. The restore itself is added in the next change."
+# =============================================================================
+# STEP 2: copy the backup, start a small isolated instance on it, wait for the WAL replay
+# =============================================================================
+RESTORE_DIR="${RESTORE_TOP}/$(date +%F_%H%M%S)_of_${BACKUP_NAME}"
+RESTORE_LOG="${RESTORE_DIR}/restore-test.log"
+SOCK_DIR=""; STARTED=0
+TIMEOUT_SECS="${RESTORE_TEST_TIMEOUT_SECS:-$TIMEOUT_SECS}"     # RESTORE_TEST_TIMEOUT_SECS and ..._POLL_SECS: for the unit tests
+POLL_SECS="${RESTORE_TEST_POLL_SECS:-10}"
+WAL_FILES=0; REDO_LINE=""; LAST_TX=""
+
+# The test runs on the same server as the real database: ask the OS to give production the
+# first call on CPU and disk. nice = CPU, ionice class 2 level 7 = lowest priority for disk.
+LOWPRIO=(nice -n 19)
+if command -v ionice >/dev/null 2>&1; then LOWPRIO+=(ionice -c2 -n7); fi
+
+# Whatever happens - success, failure, Ctrl-C - the temporary instance is stopped and its
+# socket folder removed. (The copy itself is handled in step 3.)
+cleanup() {
+    if [ "$STARTED" = "1" ] && "${BIN}/pg_ctl" status -D "$RESTORE_DIR" >/dev/null 2>&1; then
+        "${BIN}/pg_ctl" stop -D "$RESTORE_DIR" -m immediate -w -t 60 >/dev/null 2>&1 || true
+    fi
+    if [ -n "$SOCK_DIR" ]; then rm -rf "$SOCK_DIR"; fi
+}
+trap cleanup EXIT
+
+# Is something already listening on the test port? pg_isready: 0 accepting, 1 starting up,
+# 2 no answer. Only 2 means the port is free.
+READY_RC=0
+"${BIN}/pg_isready" -q -h localhost -p "$RESTORE_TEST_PORT" || READY_RC=$?
+[ "$READY_RC" -ge 2 ] || fail_run "Something already answers on port ${RESTORE_TEST_PORT} (a test that is still running?). Choose another RESTORE_TEST_PORT or wait. Nothing was copied."
+
+log_audit "Restore test started by $(whoami): ${BACKUP_NAME} -> ${RESTORE_DIR}"
+log_info "Copying ${BACKUP_NAME} to ${RESTORE_DIR} at low priority ..."
+CSTART=$SECONDS
+"${LOWPRIO[@]}" cp -a "$BACKUP_DIR" "$RESTORE_DIR" || fail_run "Copying the backup into ${RESTORE_DIR} failed."
+chmod 700 "$RESTORE_DIR"                   # PostgreSQL refuses a data directory others can read
+rm -f "${RESTORE_DIR}/postmaster.pid"
+# recovery.signal = "this is a restore: replay WAL from restore_command". No recovery target
+# is set, so PostgreSQL replays EVERY WAL file it can find and then promotes itself.
+touch "${RESTORE_DIR}/recovery.signal"
+log_info "Copy done in $(( SECONDS - CSTART )) s."
+
+SOCK_DIR="$(mktemp -d /tmp/edb-restore-test.XXXXXX)"
+chmod 700 "$SOCK_DIR"                      # a short path on purpose: socket paths are limited to ~100 characters
+
+# Settings given on the command line beat every config file in the copy, so the production
+# configuration the copy still contains can never take effect. Why each one:
+#   port, listen_addresses, unix_socket_*  its own port, this machine only, own socket folder
+#   archive_mode=off, archive_command       NEVER write into the real WAL archive
+#   restore_command                         read the WAL from the real archive (read only)
+#   hot_standby=off                         no check against the source's connection settings
+#   max_connections, shared_buffers, huge_pages  small, and no dependency on huge pages
+#   max_wal_senders=0, primary_conninfo, synchronous_standby_names   no replication of any kind
+#   logging_collector=off, ssl=off, external_pid_file   nothing outside the copy and the socket folder
+#   autovacuum, fsync, full_page_writes, synchronous_commit   off: only for a copy we throw away.
+#                                           NEVER do this on a real database - a crash would corrupt it.
+PG_SETTINGS=(
+    "port=${RESTORE_TEST_PORT}" "listen_addresses=localhost"
+    "unix_socket_directories=${SOCK_DIR}" "unix_socket_permissions=0700"
+    "archive_mode=off" "archive_command=/bin/false"
+    "restore_command='cp ${ARCHIVE_TOP}/%f %p'"
+    "hot_standby=off" "max_connections=5" "shared_buffers=128MB" "huge_pages=off"
+    "max_wal_senders=0" "primary_conninfo=''" "synchronous_standby_names=''"
+    "logging_collector=off" "ssl=off" "external_pid_file=''" "cluster_name=restore_test"
+    "autovacuum=off" "fsync=off" "full_page_writes=off" "synchronous_commit=off"
+)
+PG_OPTS=""
+for s in "${PG_SETTINGS[@]}"; do PG_OPTS+=" -c ${s}"; done
+
+log_info "Starting the temporary instance on port ${RESTORE_TEST_PORT} (limit ${RESTORE_TEST_TIMEOUT_HOURS} h) ..."
+RSTART=$SECONDS
+STARTED=1
+"${LOWPRIO[@]}" "${BIN}/pg_ctl" start -D "$RESTORE_DIR" -l "$RESTORE_LOG" -o "$PG_OPTS" -W >/dev/null \
+    || fail_run "pg_ctl could not start the temporary instance. See ${RESTORE_LOG}."
+
+# While WAL is being replayed the instance does not accept connections (hot_standby=off).
+# It starts answering only when replay has finished and it has promoted itself.
+DEADLINE=$(( SECONDS + TIMEOUT_SECS )); NEXT_NOTE=$(( SECONDS + 300 ))
+while ! "${BIN}/pg_isready" -q -h "$SOCK_DIR" -p "$RESTORE_TEST_PORT"; do
+    if ! "${BIN}/pg_ctl" status -D "$RESTORE_DIR" >/dev/null 2>&1; then
+        STARTED=0
+        [ ! -f "$RESTORE_LOG" ] || tail -n 15 "$RESTORE_LOG" | while IFS= read -r l; do log_error "  instance log: ${l}"; done
+        fail_run "The temporary instance stopped before recovery finished (a missing or damaged WAL file, or a wrong key). Log: ${RESTORE_LOG}"
+    fi
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        fail_run "Timed out: recovery was not finished after ${RESTORE_TEST_TIMEOUT_HOURS} h. The copy is kept: ${RESTORE_DIR}"
+    fi
+    if [ "$SECONDS" -ge "$NEXT_NOTE" ]; then
+        log_info "Still replaying WAL: $(grep -c 'restored log file' "$RESTORE_LOG" 2>/dev/null || true) file(s) so far, $(( (SECONDS - RSTART) / 60 )) min."
+        NEXT_NOTE=$(( SECONDS + 300 ))
+    fi
+    sleep "$POLL_SECS"
+done
+log_info "Recovery finished after $(( SECONDS - RSTART )) s: the instance accepts connections."
+
+# --- Is it a normal, writable database now? ---------------------------------------------------------
+PSQL=("${BIN}/psql" -X -h "$SOCK_DIR" -p "$RESTORE_TEST_PORT" -U "$SYSTEM_USER" -d template1 -Atq)
+IN_RECOVERY="$("${PSQL[@]}" -c 'select pg_is_in_recovery()' 2>&1)" || fail_run "Cannot query the temporary instance: ${IN_RECOVERY}"
+[ "$IN_RECOVERY" = "f" ] || fail_run "The temporary instance is still in recovery (pg_is_in_recovery=${IN_RECOVERY}); it did not finish."
+WROTE="$("${PSQL[@]}" -c 'create temp table restore_probe(i int); insert into restore_probe values (1); select count(*) from restore_probe' 2>&1)" \
+    || fail_run "The temporary instance could not write: ${WROTE}"
+[ "$WROTE" = "1" ] || fail_run "Write test on the temporary instance gave '${WROTE}', expected 1."
+
+WAL_FILES="$(grep -c 'restored log file' "$RESTORE_LOG" 2>/dev/null || true)"; WAL_FILES="${WAL_FILES:-0}"
+REDO_LINE="$(grep -E 'redo done at' "$RESTORE_LOG" 2>/dev/null | tail -1 | sed 's/^.*redo done at/redo done at/' || true)"
+LAST_TX="$(grep -E 'last completed transaction was at log time' "$RESTORE_LOG" 2>/dev/null | tail -1 | sed 's/^.*last completed transaction was at log time/last completed transaction at/' || true)"
+log_info "Replayed ${WAL_FILES} archived WAL file(s). ${REDO_LINE}${LAST_TX:+; ${LAST_TX}}"
+
+"${BIN}/pg_ctl" stop -D "$RESTORE_DIR" -m fast -w -t 300 >/dev/null 2>&1 && STARTED=0 \
+    || log_warn "The temporary instance did not stop cleanly; the exit handler will stop it hard."
+RESULT="pass"
+log_info "RESTORE TEST PASSED: ${BACKUP_NAME} restores and its WAL replays ($(( SECONDS )) s in all)."
+log_audit "Restore test PASSED: ${BACKUP_NAME}"
+log_info "The copy is still in ${RESTORE_DIR} (removing it is added in the next change)."
 exit 0
 # <<< RESTORE (step 2)
