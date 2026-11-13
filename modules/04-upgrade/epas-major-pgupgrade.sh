@@ -221,3 +221,4 @@ fi
 
 log_audit "Major upgrade completed (${MODE_STR}-mode): EPAS ${OLD_EPAS_VERSION} ${OLD_DATA} -> EPAS ${EPAS_VERSION} ${NEW_DATA}"
 log_info "Next: check the application, then remove the old cluster with /tmp/delete_old_cluster.sh (if generated) once you no longer need it."
+log_info "EFM cluster? Follow docs/epas-major-upgrade-efm.md: point EFM at the new cluster (05-efm/efm-reconfigure-after-upgrade.sh), start it on this node, rebuild the standby, then add it to EFM."
