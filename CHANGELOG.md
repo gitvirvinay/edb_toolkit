@@ -4,6 +4,9 @@ What changed in edb_toolkit, newest first. Updated together with every change.
 
 ## Unreleased
 
+- `generate-selfsigned-single.sh` now logs through `lib/common.sh` like every other script
+  (a run is recorded in `<LOG_MOUNT>/toolkit`, and it accepts `--env`/`--help` the same way).
+  No behavior change otherwise: same arguments, same output bundle.
 - **`tools/epas_full_uninstall.sh` now asks before it deletes anything.** On a terminal you type
   the host name to continue; unattended (cron, Ansible, a pipe) it refuses unless `--yes` is given.
   Before, it started deleting as soon as it was run. The run is logged in `<LOG_MOUNT>/toolkit`
