@@ -175,6 +175,26 @@ confirm_or_exit() {
     log_audit "Confirmed by $(whoami): $*"
 }
 
+# confirm_destructive "what is about to happen"
+#   For actions that cannot be undone (wipe a server, drop a cluster). Stronger than confirm_or_exit:
+#   - on a terminal: shows the host name and asks the operator to type it back exactly;
+#   - not on a terminal (cron, Ansible, a pipe): refuses unless --yes was given. An irreversible
+#     action must be asked for explicitly; it must never happen because nobody was there to say no.
+confirm_destructive() {
+    local host answer
+    host="$(hostname -s 2>/dev/null || hostname)"
+    if [ "$ASSUME_YES" = "1" ]; then
+        log_audit "Destructive action on ${host} accepted with --yes by $(whoami): $*"
+        return 0
+    fi
+    [ -t 0 ] || die "Not on a terminal: '$*' needs --yes to run unattended."
+    log_warn "About to: $*"
+    log_warn "This cannot be undone. Type the host name '${host}' to continue; anything else stops."
+    read -r -p "Host name: " answer
+    [ "$answer" = "$host" ] || die "Cancelled: '${answer}' is not '${host}'."
+    log_audit "Destructive action on ${host} confirmed by $(whoami): $*"
+}
+
 # wait_for_epas [tries] [seconds] — pg_isready on PRIMARY_PORT as SYSTEM_USER; returns 1 on timeout
 wait_for_epas() {
     local tries="${1:-12}" secs="${2:-5}" i bin

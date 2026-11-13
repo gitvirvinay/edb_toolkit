@@ -218,6 +218,26 @@ out=$(grep -rlE 'patch-(primary|dr)-(shutdown|startup)|epas-minor-patch-update|e
       --include='*.sh' --include='*.example' --include='epas-automation' modules lib tools conf 2>/dev/null | tr '\n' ' ')
 eq "no script or config still refers to an old name" "" "$out"
 
+echo "== confirm_destructive (lib/common.sh)"
+env_file
+out=$(settings 'confirm_destructive "wipe the test host" </dev/null; echo REACHED'); rc=$?
+hasnt "no terminal, no --yes: stops before the action" "REACHED" "$out"
+has   "no terminal, no --yes: says --yes is needed"     "needs --yes" "$out"
+out=$(settings 'ASSUME_YES=1; confirm_destructive "wipe the test host"; echo REACHED')
+has   "--yes: goes ahead"                               "REACHED" "$out"
+has   "--yes: writes an audit line"                     "accepted with --yes" "$(cat "$T"/logs/* 2>/dev/null)"
+
+echo "== tools/epas_full_uninstall.sh"
+out=$(run tools/epas_full_uninstall.sh); rc=$?
+if [ "$(id -u)" -ne 0 ]; then
+    eq  "not root: refuses (exit code 1)"               "1" "$rc"
+    has "not root: says so"                             "Run as root" "$out"
+    eq  "not root: nothing is stopped"                  "" "$(calls)"
+fi
+grep -q 'confirm_destructive' tools/epas_full_uninstall.sh; eq "asks for the host name before deleting" 0 $?
+out=$(grep -nE 'rm -rf.*(DATA_TOP|WAL_TOP|ARCHIVE_TOP|BACKUP_TOP|LOG_TOP|BINARY_TOP|/pgdata|/pgwal|/pgarchive|/pgbackup|/pglog)' tools/epas_full_uninstall.sh)
+eq "never deletes the cluster mounts"                   "" "$out"
+
 echo "== Template (conf/site.env.example)"
 out=$(bash -c 'set -u; source conf/site.env.example; echo "$APP_CODE|$SITE|$HA_TOOL|$BACKUP_TOOL"' 2>&1)
 eq "standard values"                            "|primary|efm|basebackup" "$out"
