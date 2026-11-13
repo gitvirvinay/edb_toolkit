@@ -2,7 +2,7 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
-## Unreleased
+## v2.0.0 - 2026-11-12
 
 - **Breaking: the patching scripts are renamed, and four became two.** One pair of scripts now
   serves both sites, with or without EFM; `SITE` and `HA_TOOL` in `site.env` decide what they do.
