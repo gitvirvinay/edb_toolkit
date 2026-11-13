@@ -1,145 +1,102 @@
-#!/bin/bash
-# ==============================================================================
-# Script Name : clean_edb.sh
-# Purpose     : Completely remove EPAS (15/17), PEM, and EFM from RHEL systems.
-# WARNING     : THIS WILL PERMANENTLY DELETE ALL EDB DATA, CLUSTERS, AND LOGS.
-# ==============================================================================
+#!/usr/bin/env bash
+# =============================================================================
+# tools/epas_full_uninstall.sh - remove EPAS (15/17), EFM and PEM from a RHEL server
+#
+#   sudo tools/epas_full_uninstall.sh [--env conf/site.env] [--yes]
+#
+# WARNING: removes every EDB package, service and OS user, and deletes /var/lib/edb,
+# /etc/edb, /usr/edb, /var/log/edb and the EFM and PEM equivalents. It cannot be undone.
+# Run it as root (sudo). On a terminal it asks you to type the host name first;
+# unattended (cron, Ansible) it refuses unless --yes is given.
+#
+# It does NOT touch the cluster mounts (DATA_TOP, WAL_TOP, ARCHIVE_TOP, BACKUP_TOP, LOG_TOP)
+# or BINARY_TOP: it lists at the end what is left there, to be removed by hand once the
+# backups are known to be safe somewhere else.
+#
+# The run is logged in <LOG_MOUNT>/toolkit, the one log directory this script keeps.
+# =============================================================================
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
+source "${SCRIPT_DIR}/../lib/common.sh"
 
-# Ensure running as root
-if [ "$EUID" -ne 0 ]; then
-  echo "[ERROR] Please run this script as root or with sudo."
-  exit 1
-fi
+usage() { sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
+parse_common_args "$@"; set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+case "${1:-}" in -h|--help) usage ;; "") ;; *) die "Unknown option: $1 (see --help)" ;; esac
+require_root
+load_env optional          # a half-installed server may have no site.env; it must still be cleanable
 
-echo "====================================================================="
-echo " STARTING COMPLETE UNINSTALL OF EPAS, PEM, AND EFM ON RHEL"
-echo "====================================================================="
+PKG_MGR="dnf"; command -v dnf >/dev/null 2>&1 || PKG_MGR="yum"
 
-# ------------------------------------------------------------------------------
-# STEP 1: STOP AND DISABLE SERVICES
-# ------------------------------------------------------------------------------
-echo "--> Stopping and disabling EDB services..."
+log_info "Complete uninstall of EPAS, EFM and PEM on $(hostname -s)"
+log_info "EDB packages installed now: $(rpm -qa 2>/dev/null | grep -iE '^(edb|efm|pem)' | tr '\n' ' ')"
+confirm_destructive "remove all EDB software, services, OS users and system directories on this host"
+log_audit "Uninstall started by $(whoami)"
 
-# EPAS Services
-systemctl stop edb-as-15 edb-as-17 2>/dev/null || true
+# ---- 1. Stop and disable services --------------------------------------------------------------
+log_info "Step 1: stopping and disabling EDB services"
+systemctl stop    edb-as-15 edb-as-17 2>/dev/null || true
 systemctl disable edb-as-15 edb-as-17 2>/dev/null || true
-
-# EFM Services (Catches any version like efm-4.x)
-for service in $(systemctl list-unit-files | grep -E '^efm-[0-9]' | awk '{print $1}'); do
-    systemctl stop "$service" 2>/dev/null || true
+for service in $(systemctl list-unit-files 2>/dev/null | awk '/^(edb-)?efm-[0-9]/ {print $1}'); do
+    systemctl stop    "$service" 2>/dev/null || true
     systemctl disable "$service" 2>/dev/null || true
 done
-
-# PEM Services
-systemctl stop pemagent pem-httpd edb-pem-server 2>/dev/null || true
+systemctl stop    pemagent pem-httpd edb-pem-server 2>/dev/null || true
 systemctl disable pemagent pem-httpd edb-pem-server 2>/dev/null || true
 
-# Kill any leftover orphaned processes
-echo "--> Terminating any lingering processes..."
-pkill -u enterprisedb 2>/dev/null || true
-pkill -u efm 2>/dev/null || true
-pkill -u pem 2>/dev/null || true
+log_info "Step 1: ending leftover processes of enterprisedb, efm and pem"
+for u in enterprisedb efm pem; do pkill -u "$u" 2>/dev/null || true; done
 
-# ------------------------------------------------------------------------------
-# STEP 2: REMOVE RPM PACKAGES
-# ------------------------------------------------------------------------------
-echo "--> Uninstalling RPM packages via DNF/YUM..."
-
-PKG_MGR="dnf"
-if ! command -v dnf &> /dev/null; then
-    PKG_MGR="yum"
-fi
-
+# ---- 2. Remove packages -----------------------------------------------------------------------
+log_info "Step 2: removing packages with ${PKG_MGR}"
 $PKG_MGR remove -y "edb-as*" "edb-pem*" "edb-efm*" "edb-repo*" 2>/dev/null || true
 $PKG_MGR autoremove -y 2>/dev/null || true
 
-# ------------------------------------------------------------------------------
-# STEP 3: DELETE DATA DIRECTORIES, CONFIGS, LOGS, AND SYSTEMD FILES
-# ------------------------------------------------------------------------------
-echo "--> Deleting data directories, configurations, and logs..."
-
-# Data & Config paths for EPAS, PEM, and EFM
-rm -rf /var/lib/edb/
-rm -rf /etc/edb/
-rm -rf /usr/edb/
-rm -rf /var/log/edb/
-
-# EFM specific paths
-rm -rf /etc/efm*/
-rm -rf /var/log/efm*/
-rm -rf /var/efm*/
-
-# PEM specific paths
-rm -rf /var/log/pem/
-rm -rf /usr/pem/
-rm -rf /root/.pem/ /home/*/.pem/
-
-# Systemd custom overrides & lingering unit files
-rm -f /etc/systemd/system/edb-as*
-rm -f /etc/systemd/system/efm*
-rm -f /etc/systemd/system/pem*
-rm -f /usr/lib/systemd/system/edb-as*
-rm -f /usr/lib/systemd/system/efm*
-rm -f /usr/lib/systemd/system/pem*
+# ---- 3. Delete system directories and unit files ----------------------------------------------
+log_info "Step 3: deleting EDB system directories (/var/lib/edb /etc/edb /usr/edb /var/log/edb, EFM, PEM)"
+rm -rf /var/lib/edb/ /etc/edb/ /usr/edb/ /var/log/edb/
+rm -rf /etc/efm*/ /var/log/efm*/ /var/efm*/
+rm -rf /var/log/pem/ /usr/pem/ /root/.pem/ /home/*/.pem/
+rm -f  /etc/systemd/system/edb-as*     /etc/systemd/system/efm*     /etc/systemd/system/pem*
+rm -f  /usr/lib/systemd/system/edb-as* /usr/lib/systemd/system/efm* /usr/lib/systemd/system/pem*
 systemctl daemon-reload
 
-# ------------------------------------------------------------------------------
-# STEP 4: REMOVE USERS AND GROUPS
-# ------------------------------------------------------------------------------
-echo "--> Deleting EDB service accounts and groups..."
+# ---- 4. Remove OS users and groups ------------------------------------------------------------
+log_info "Step 4: removing OS users and groups enterprisedb, efm, pem"
+for u in enterprisedb efm pem; do userdel -r "$u" 2>/dev/null || true; done
+for g in enterprisedb efm pem; do groupdel  "$g" 2>/dev/null || true; done
 
-userdel -r enterprisedb 2>/dev/null || true
-userdel -r efm 2>/dev/null || true
-userdel -r pem 2>/dev/null || true
-
-groupdel enterprisedb 2>/dev/null || true
-groupdel efm 2>/dev/null || true
-groupdel pem 2>/dev/null || true
-
-# ------------------------------------------------------------------------------
-# STEP 5: CLEAN UP EDB REPOSITORIES AND CACHE
-# ------------------------------------------------------------------------------
-echo "--> Cleaning package repositories and metadata cache..."
-
+# ---- 5. Repositories and cache ---------------------------------------------------------------
+log_info "Step 5: removing EDB repositories and package cache"
 rm -f /etc/yum.repos.d/edb*.repo
-$PKG_MGR clean all
+$PKG_MGR clean all >/dev/null 2>&1 || true
 rm -rf /var/cache/dnf /var/cache/yum
 
-# ------------------------------------------------------------------------------
-# STEP 6: VERIFICATION
-# ------------------------------------------------------------------------------
-echo "====================================================================="
-echo " UNINSTALLATION COMPLETE — VERIFYING CLEAN STATE"
-echo "====================================================================="
+# ---- 6. Verify --------------------------------------------------------------------------------
+log_info "Step 6: verifying"
+left=$(ps -eo user:20,pid,comm | awk 'NR>1 && ($1 ~ /^(enterprisedb|efm|pem)$/ || $3 ~ /^(edb-|efm|pemagent|postgres|postmaster|edb-postgres)/)' || true)
+if [ -z "$left" ]; then log_info "  processes: none left (PASS)"
+else log_warn "  processes still running:"; log_warn "$left"; fi
 
-echo "[1] Checking for running EDB processes:"
-LEFTOVER_PROC=$(ps aux | grep -iE 'edb|post|efm|pem' | grep -v 'grep' | grep -v 'clean_edb.sh' || true)
-if [ -z "$LEFTOVER_PROC" ]; then
-    echo "    --> No lingering processes found. (PASS)"
-else
-    echo "    --> WARNING: Found remaining processes:"
-    echo "$LEFTOVER_PROC"
-fi
+left=$(rpm -qa 2>/dev/null | grep -iE '^(edb|efm|pem)' || true)
+if [ -z "$left" ]; then log_info "  packages: none left (PASS)"
+else log_warn "  packages still installed: $(echo "$left" | tr '\n' ' ')"; fi
 
-echo "[2] Checking for installed EDB packages:"
-LEFTOVER_PKG=$(rpm -qa | grep -iE 'edb|efm|pem' || true)
-if [ -z "$LEFTOVER_PKG" ]; then
-    echo "    --> No packages found. (PASS)"
-else
-    echo "    --> WARNING: Found remaining RPM packages:"
-    echo "$LEFTOVER_PKG"
-fi
+left=$(ss -tlnp 2>/dev/null | grep -E ':(5444|5432|8443)[[:space:]]' || true)
+if [ -z "$left" ]; then log_info "  ports 5444/5432/8443: free (PASS)"
+else log_warn "  ports still in use:"; log_warn "$left"; fi
 
-echo "[3] Checking network ports (5444/5432/8443):"
-LEFTOVER_PORTS=$(ss -tulpn | grep -E '5444|5432|8443' || true)
-if [ -z "$LEFTOVER_PORTS" ]; then
-    echo "    --> All relevant ports are free. (PASS)"
-else
-    echo "    --> WARNING: Found active bindings on target ports:"
-    echo "$LEFTOVER_PORTS"
-fi
+# ---- 7. What this script deliberately left alone ---------------------------------------------
+log_info "Left in place (remove by hand once the backups are confirmed safe elsewhere):"
+kept=0
+for v in DATA_TOP WAL_TOP ARCHIVE_TOP BACKUP_TOP LOG_TOP BINARY_TOP; do
+    d="${!v:-}"
+    if [ -n "$d" ] && [ -e "$d" ]; then
+        log_info "  ${v}=${d}  ($(du -sh "$d" 2>/dev/null | cut -f1 || echo '?'))"; kept=1
+    fi
+done
+[ "$kept" -eq 1 ] || log_info "  nothing found (no site.env, or the directories do not exist)"
 
-echo "---------------------------------------------------------------------"
-echo "Server is ready for a clean reinstall!"
+log_audit "Uninstall finished on $(hostname -s)"
+log_info "Server is ready for a clean reinstall."

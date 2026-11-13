@@ -2,6 +2,18 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
+## Unreleased
+
+- **`tools/epas_full_uninstall.sh` now asks before it deletes anything.** On a terminal you type
+  the host name to continue; unattended (cron, Ansible, a pipe) it refuses unless `--yes` is given.
+  Before, it started deleting as soon as it was run. The run is logged in `<LOG_MOUNT>/toolkit`
+  with audit lines for who confirmed it and when it finished.
+- The uninstall script lists what it leaves in place (`DATA_TOP`, `WAL_TOP`, `ARCHIVE_TOP`,
+  `BACKUP_TOP`, `LOG_TOP`, `BINARY_TOP`, with sizes) for removal by hand. It never deleted them,
+  but did not say so.
+- Its leftover-process check no longer reports unrelated programs (it matched `post`, as in postfix).
+- New in `lib/common.sh`: `confirm_destructive`, for actions that cannot be undone.
+
 ## v2.0.0 - 2026-11-12
 
 - **Breaking: the patching scripts are renamed, and four became two.** One pair of scripts now
