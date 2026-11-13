@@ -9,6 +9,7 @@ test:        ## unit tests (no database or root needed)
 	@bash tests/epas-detect-unit.sh
 	@bash tests/epas-ssl-unit.sh
 	@bash tests/epas-layout-unit.sh
+	@bash tests/epas-tde-unit.sh
 	@bash tests/logger-unit.sh
 	@bash tests/common-unit.sh
 	@bash tests/backup-unit.sh

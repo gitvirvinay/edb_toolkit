@@ -69,3 +69,24 @@ On success the dump files are deleted (logs kept) unless `--keep-dumps`. The dum
 TDE: no passphrase is needed (the new service already unwraps its own key). Dump files of an encrypted cluster are
 **not** encrypted, so they're kept in a 700 directory and deleted after success. If the old cluster uses TDE and the
 new one doesn't, the script stops unless you pass `--allow-unencrypted-target`.
+
+## TDE preflight (in `epas-major-pgupgrade.sh`)
+
+When either cluster is encrypted and `TDE_UNWRAP_CMD` is set, the script checks **before anything is stopped** (`lib/epas-tde.sh`):
+the passphrase file exists, is readable and is outside both data directories (a file inside the data directory would be copied into every
+backup and standby); `-pass pass:...` in a command is refused; a group- or world-readable file is a warning. It then compares the old
+cluster's own `data_encryption_key_unwrap_command` file with the new one (`cmp`, nothing printed): if the passphrases differ it stops,
+because `pg_upgrade` gets one unwrap command for both clusters. Same passphrase, different file names is fine.
+
+## `epas-post-upgrade-backup.sh` — first backup on the new version (runbook steps 9 and 10)
+
+```bash
+# as the EPAS OS user, on the new primary, after the application has been validated
+modules/04-upgrade/epas-post-upgrade-backup.sh
+```
+
+Only for `BACKUP_TOOL=basebackup`. Checks it is on the new primary, that `archive_mode=on` with `archive-wal.sh` (it never restarts EPAS),
+moves backups of the older version into `BACKUP_TOP/pre-upgrade-epas<old>-<time>/` (kept, not deleted), proves archiving with a WAL
+switch, runs `take-basebackup.sh`, then `restore-test.sh --pick latest`. If the switch test fails, the usual cause is an old file with the
+same name in `ARCHIVE_TOP` (`archive-wal.sh` refuses to overwrite it): the message says what to do.
+Not yet run on a real server: see `docs/epas-upgrade-rehearsal.md`.

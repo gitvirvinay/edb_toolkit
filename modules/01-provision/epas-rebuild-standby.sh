@@ -8,6 +8,8 @@ source "${SCRIPT_DIR}/../../lib/common.sh"
 source "${SCRIPT_DIR}/../../lib/epas-detect.sh"
 # shellcheck source=../../lib/epas-ssl.sh
 source "${SCRIPT_DIR}/../../lib/epas-ssl.sh"
+# shellcheck source=../../lib/epas-tde.sh
+source "${SCRIPT_DIR}/../../lib/epas-tde.sh"
 
 usage() {
     cat <<USAGE
@@ -17,6 +19,11 @@ DATA_TOP_bak_<timestamp> (and WAL_TOP to WAL_TOP_bak_<timestamp> when set), re-c
 (--waldir=WAL_TOP when set; optional replication slot), checks SSL, starts it.
 SSL: pg_basebackup copies the primary's conf.d/ssl.conf. Before starting, the files it names must exist
 on THIS host (else it stops, data kept) and the certificate should fit this host (warning only).
+TDE: if the primary is encrypted, the passphrase file named by the unwrap command must exist on THIS host
+(outside the data directory) before the standby can start; it is checked before anything is stopped, and again
+on the copied configuration before starting. The passphrase itself is never copied by this script.
+Before anything is stopped it also checks that the binaries match the primary's major version and that there
+is room for a full new copy next to the old one (the old one is kept until you delete it).
 Refuses to run if the local EPAS is up and is NOT a standby (i.e. you are on the primary).
 Run as: the EPAS OS user (SYSTEM_USER). Config is required (default: conf/site.env in the repo).
 USAGE
@@ -70,6 +77,53 @@ for d in "$DATA_TOP" ${WAL_TOP:+"$WAL_TOP"}; do
     parent="$(dirname "$d")"
     [[ -d "$parent" && -w "$parent" ]] || die "${parent} is not writable by ${CURRENT_USER}: the old ${d} cannot be moved aside to ${d}_bak_<timestamp>. As root: chown ${SYSTEM_USER}: ${parent} && chmod 750 ${parent} (epas-base-build-root.sh does this). Nothing was changed."
 done
+
+# ==========================================
+# UPGRADE PREFLIGHT (before anything is stopped or moved)
+# ==========================================
+# 1. The binaries here must be the same major version as the primary: a standby of another version
+#    cannot replay its WAL. (After pg_upgrade the primary is on 17: this host needs 17 binaries too.)
+BIN_MAJOR=$("${BINARY_TOP}/bin/pg_basebackup" --version 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
+PRIMARY_NUM=$("${BINARY_TOP}/bin/psql" -h "${PRIMARY_HOST}" -p "${PRIMARY_PORT}" -U "${REP_USER}" -d postgres \
+    -XAtc "SHOW server_version_num;" 2>/dev/null || true)
+if [[ "$PRIMARY_NUM" =~ ^[0-9]+$ && "$BIN_MAJOR" =~ ^[0-9]+$ ]]; then
+    if (( PRIMARY_NUM / 10000 != BIN_MAJOR )); then
+        die "The primary ${PRIMARY_HOST} is on major version $(( PRIMARY_NUM / 10000 )), but BINARY_TOP (${BINARY_TOP}) is version ${BIN_MAJOR}. Install the matching EPAS and point BINARY_TOP at it. Nothing was changed."
+    fi
+    log_info "Version check: primary and local binaries are both EPAS ${BIN_MAJOR}."
+else
+    log_warn "Could not read the primary's version (is ${REP_USER} allowed to connect to 'postgres'?): version check skipped."
+fi
+
+# 2. Disk space: the old data directory is moved aside, not deleted (it is the way back), so the fresh
+#    copy needs its own room. Sized from the primary when it can be read.
+if PRIMARY_BYTES=$("${BINARY_TOP}/bin/psql" -h "${PRIMARY_HOST}" -p "${PRIMARY_PORT}" -U "${REP_USER}" -d postgres \
+        -XAtc "SELECT sum(pg_database_size(datname))::bigint FROM pg_database;" 2>/dev/null) && [[ "$PRIMARY_BYTES" =~ ^[0-9]+$ ]]; then
+    for d in "$DATA_TOP"; do
+        AVAIL_BYTES=$(df --output=avail -B1 "$(dirname "$d")" 2>/dev/null | tail -1 | tr -d ' ')
+        NEEDED_BYTES=$(( PRIMARY_BYTES + PRIMARY_BYTES / 10 ))
+        if [[ "$AVAIL_BYTES" =~ ^[0-9]+$ ]] && (( AVAIL_BYTES < NEEDED_BYTES )); then
+            die "Not enough room beside ${d}: ${AVAIL_BYTES} bytes free, about ${NEEDED_BYTES} needed for a new copy (primary is ${PRIMARY_BYTES} bytes) while the old directory is kept. Free space (for example delete an older _bak_ directory you no longer need) and run again. Nothing was changed."
+        fi
+    done
+    log_info "Space check: about ${NEEDED_BYTES:-?} bytes needed beside ${DATA_TOP}, ${AVAIL_BYTES:-?} free."
+else
+    log_warn "Could not read the primary's size: disk space check skipped."
+fi
+
+# 3. TDE: when this site uses an unwrap command, its passphrase file must already be on THIS host.
+#    (The copied postgresql.conf is checked again below, which is the authoritative check.)
+if [[ "${TDE_ENABLED:-yes}" != [Nn]o && -n "${TDE_UNWRAP_CMD:-}" ]]; then
+    TDE_RC=0; TDE_REPORT="$(epas_tde_check_unwrap "$TDE_UNWRAP_CMD" "$DATA_TOP")" || TDE_RC=$?
+    while IFS= read -r line; do
+        case "$line" in
+            ERROR*) log_error "TDE: ${line#ERROR }" ;;
+            WARN*)  log_warn  "TDE: ${line#WARN  }" ;;
+            ?*)     log_info  "TDE: ${line#OK    }" ;;
+        esac
+    done <<< "$TDE_REPORT"
+    (( TDE_RC == 0 )) || die "TDE_UNWRAP_CMD in the config does not pass (see above). Install the passphrase file on this host from your approved source first. Nothing was changed."
+fi
 
 show_config PRIMARY_HOST PRIMARY_PORT REP_USER USE_REPLICATION_SLOT REP_SLOT_NAME SYSTEM_USER BINARY_TOP DATA_TOP WAL_TOP
 confirm_or_exit "rebuild $(hostname -s) as a standby of ${PRIMARY_HOST}: stop local EPAS, move ${DATA_TOP}${WAL_TOP:+ and ${WAL_TOP}} aside, pg_basebackup a fresh copy"
@@ -157,7 +211,7 @@ declare -a BASEBACKUP_ARGS=(
     "-p" "${PRIMARY_PORT}"
     "-U" "${REP_USER}"
     "-D" "${DATA_TOP}"
-    "-Fp" "-Xs" "-P" "-R" "-v"
+    "-Fp" "-Xs" "-P" "-R" "-v" "--checkpoint=fast"
 )
 
 if [ "${USE_REPLICATION_SLOT}" = "true" ]; then
@@ -182,6 +236,23 @@ fi
 
 # Flip the success marker safely before the trap block unbinds
 STREAM_SUCCESS=1
+
+# ==========================================
+# TDE CHECK (before starting): the copied postgresql.conf names the unwrap command of the PRIMARY.
+# Its passphrase file must exist here, outside the data directory, or the standby cannot start.
+# ==========================================
+if [[ "$(epas_tde "$DATA_TOP")" == yes ]]; then
+    COPIED_CMD="$(epas_conf_get "$DATA_TOP" data_encryption_key_unwrap_command)"
+    TDE_RC=0; TDE_REPORT="$(epas_tde_check_unwrap "$COPIED_CMD" "$DATA_TOP")" || TDE_RC=$?
+    while IFS= read -r line; do
+        case "$line" in
+            ERROR*) log_error "TDE: ${line#ERROR }" ;;
+            WARN*)  log_warn  "TDE: ${line#WARN  }" ;;
+            ?*)     log_info  "TDE: ${line#OK    }" ;;
+        esac
+    done <<< "$TDE_REPORT"
+    (( TDE_RC == 0 )) || die "The primary is encrypted and this host cannot unwrap the key (see above). The copy is kept in ${DATA_TOP}; install the passphrase file here, then start it with: ${BINARY_TOP}/bin/pg_ctl -D ${DATA_TOP} start -w"
+fi
 
 # ==========================================
 # SSL CHECK (before starting): pg_basebackup copied the PRIMARY's conf.d/ssl.conf - and, in the old
