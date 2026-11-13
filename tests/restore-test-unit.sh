@@ -27,10 +27,11 @@ echo "pg_verifybackup \$*" >> "$T/calls"
 [ -f "$T/verify_fail" ] && { echo "pg_verifybackup: error: checksum mismatch" >&2; exit 1; }
 echo "backup successfully verified"; exit 0
 FAKE
-# df --output=avail -B1 DIR: a tiny number when $T/df_small exists, the real answer otherwise
+# df --output=avail -B1 DIR: 1 byte free when $T/df_small exists (smaller than any backup, on any
+# filesystem - directory sizes differ between filesystems), the real answer otherwise
 cat > "$T/bin/df" <<FAKE
 #!/bin/sh
-if [ -f "$T/df_small" ]; then printf 'Avail\n  1000\n'; else exec /bin/df "\$@"; fi
+if [ -f "$T/df_small" ]; then printf 'Avail\n  1\n'; else exec /bin/df "\$@"; fi
 FAKE
 # The temporary instance is faked with a few flag files in $T:
 #   pg_running = the "postmaster" is alive      pg_ready = it accepts connections
