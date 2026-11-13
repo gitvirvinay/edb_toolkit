@@ -4,6 +4,21 @@ What changed in edb_toolkit, newest first. Updated together with every change.
 
 ## Unreleased
 
+- **New backup module for `BACKUP_TOOL=basebackup`** (`modules/06-backup/`):
+  - `enable-wal-archiving.sh` stages `conf.d/06-archiving.conf` (`archive_mode=on`, `archive_command`
+    → `ARCHIVE_TOP`). Called automatically from `epas-base-build-db.sh` for a new cluster; also safe
+    to run against an existing one, where it warns that `archive_mode` needs a restart.
+  - `archive-wal.sh`, the `archive_command` itself: never overwrites a differing WAL file already at
+    the destination, and writes under a temp name before `mv`, so a crash never leaves a short file
+    under the real name.
+  - `take-basebackup.sh` takes a `pg_basebackup` into `BACKUP_TOP/<timestamp>_<tag>` (checking free
+    space first) and, only after it succeeds, prunes backups older than the new setting
+    `BACKUP_RETENTION_DAYS` (default 10) — pruning needs `--yes` (for cron), same rule as every other
+    destructive action in this toolkit.
+  - These act only when `BACKUP_TOOL=basebackup`; every other value is a no-op or a clear refusal that
+    points at the right tool (pgBackRest manages its own `archive_command`; Barman is not built yet).
+  - New unit tests (`tests/backup-unit.sh`, run by `make test` and CI).
+
 - `generate-selfsigned-single.sh` now logs through `lib/common.sh` like every other script
   (a run is recorded in `<LOG_MOUNT>/toolkit`, and it accepts `--env`/`--help` the same way).
   No behavior change otherwise: same arguments, same output bundle.
