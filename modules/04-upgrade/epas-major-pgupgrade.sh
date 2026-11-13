@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../lib/common.sh"
 # shellcheck source=../../lib/epas-detect.sh
 source "${SCRIPT_DIR}/../../lib/epas-detect.sh"
+# shellcheck source=../../lib/epas-tde.sh
+source "${SCRIPT_DIR}/../../lib/epas-tde.sh"
 MIGRATE_SSL="${SCRIPT_DIR}/../02-ssl/epas-migrate-ssl-conf.sh"
 
 USE_LINK=false
@@ -127,6 +129,50 @@ if [[ -n "${TDE_WRAP_CMD:-}" && -n "${TDE_UNWRAP_CMD:-}" && "${TDE_WRAP_CMD}" !=
     log_info "Using TDE Key Wrap/Unwrap commands defined in the config"
     export PGDATAKEYWRAPCMD="${TDE_WRAP_CMD}"
     export PGDATAKEYUNWRAPCMD="${TDE_UNWRAP_CMD}"
+    # --- TDE PREFLIGHT (nothing is stopped yet). pg_upgrade gets ONE unwrap command for both clusters,
+    #     so the old and the new cluster must use the same passphrase. ---
+    if [[ "$OLD_TDE" == true || "$NEW_TDE" == true ]]; then
+        tde_report() {   # tde_report TEXT: log OK/WARN/ERROR lines; returns 1 if any ERROR
+            local line rc=0
+            while IFS= read -r line; do
+                case "$line" in
+                    ERROR*) log_error "TDE: ${line#ERROR }"; rc=1 ;;
+                    WARN*)  log_warn  "TDE: ${line#WARN  }" ;;
+                    ?*)     log_info  "TDE: ${line#OK    }" ;;
+                esac
+            done <<< "$1"
+            return "$rc"
+        }
+        TDE_FILE_NEW="$(epas_tde_passfile "$TDE_UNWRAP_CMD")"
+        TDE_REPORT="$(epas_tde_check_unwrap "$TDE_UNWRAP_CMD" "$NEW_DATA")" || true
+        tde_report "$TDE_REPORT" || die "TDE_UNWRAP_CMD does not pass the checks above. Nothing was changed."
+        # The file must not live in the OLD data directory either: removing the old cluster after sign-off would take it.
+        if [[ -n "$TDE_FILE_NEW" ]]; then
+            case "$(readlink -m "$TDE_FILE_NEW")/" in
+                "$(readlink -m "$OLD_DATA")"/*) die "The passphrase file ${TDE_FILE_NEW} is inside the old data directory ${OLD_DATA}. Move it to /etc/edb/tde first. Nothing was changed." ;;
+            esac
+        fi
+        # What does the OLD cluster use? Its own postgresql.conf says.
+        OLD_UNWRAP="$(epas_conf_get "$OLD_DATA" data_encryption_key_unwrap_command)"
+        if [[ -z "$OLD_UNWRAP" ]]; then
+            log_warn "TDE: the old cluster's postgresql.conf has no data_encryption_key_unwrap_command (set another way?): cannot compare its passphrase with the new one."
+        else
+            if [[ "$OLD_UNWRAP" =~ -pass[[:space:]]+[\"\']?pass: ]]; then
+                log_warn "TDE: the old cluster's unwrap command holds its passphrase in plain text in postgresql.conf. Fix this on the new cluster (use -pass file:); the old cluster goes away after sign-off."
+            fi
+            TDE_FILE_OLD="$(epas_tde_passfile "$OLD_UNWRAP")"
+            if [[ -n "$TDE_FILE_OLD" && -n "$TDE_FILE_NEW" ]]; then
+                SAME_RC=0; epas_tde_same_passphrase "$TDE_FILE_OLD" "$TDE_FILE_NEW" || SAME_RC=$?
+                case "$SAME_RC" in
+                    0) log_info "TDE: the old and new passphrase files hold the same passphrase (as expected for one unwrap command)." ;;
+                    1) die "TDE: the old cluster (${TDE_FILE_OLD}) and the new one (${TDE_FILE_NEW}) use DIFFERENT passphrases. This script gives pg_upgrade one unwrap command for both, so it cannot read both. Re-wrap the new cluster with the old passphrase, or ask for a two-command upgrade. Nothing was changed." ;;
+                    *) log_warn "TDE: could not compare the old and new passphrase files (not readable by $(whoami)); pg_upgrade --check below will show if the key cannot be read." ;;
+                esac
+            else
+                log_warn "TDE: the old or new unwrap command does not name a passphrase file: passphrases not compared; pg_upgrade --check below will show if the key cannot be read."
+            fi
+        fi
+    fi
 else
     read -r -s -p "Enter TDE master passphrase: " PGPASSWORD_TDE; echo ""
     TMP_PASS=$(mktemp)

@@ -12,7 +12,8 @@ back loses everything written since.
 1. Fresh backup of the old cluster, verified (the script asks you to confirm).
 2. New cluster already built and initialised on the primary (`01-provision`), same TDE passphrase setup.
 3. A copy of the EFM properties file made ready for EPAS 17 (or plan to use step 6 below).
-4. Rehearsed once on a copy; note the `pg_upgrade` time.
+4. Rehearsed once on a copy, with `docs/epas-upgrade-rehearsal.md` filled in (times and checks).
+5. The TDE passphrase file is outside the data directory (`/etc/edb/tde`), is the same for the old and new cluster, and has a copy outside the servers. The upgrade script checks the first two before stopping anything.
 
 ## In the window
 | # | Step | Where | How |
@@ -23,10 +24,10 @@ back loses everything written since.
 | 4 | Validate with the application | primary | Application up, tests pass. If it fails here, go back (see the point of no return above). |
 | 5 | Put the EPAS 17 properties file in place | primary | `modules/05-efm/efm-reconfigure-after-upgrade.sh` (backs the file up, sets `db.bin`, `db.data.dir`, `db.port`, `db.service.name`, `db.config.dir`) or your prepared file |
 | 6 | Start EFM on the primary only | primary | `systemctl start <efm unit>`; `efm-cluster-status.sh` shows one node. No VIP, so nothing else to move. |
-| 7 | Rebuild the standby on EPAS 17 | standby | New binaries; `pg_basebackup -h <primary> -U replicator -p <port> -D $PGDATA -Fp -Xs -P -R --checkpoint=fast`; start; check replication on the primary |
+| 7 | Rebuild the standby on EPAS 17 | standby | New binaries and the site config for 17 on this host, passphrase file already installed. `modules/01-provision/epas-rebuild-standby.sh`: checks the version, the free space (old data is kept beside the new copy) and the TDE passphrase file, then `pg_basebackup -R --checkpoint=fast`, starts it. Check replication on the primary |
 | 8 | Add the standby to EFM | primary, then standby | `efm allow-node <cluster> <standby ip>` on the primary; EPAS 17 properties on the standby (step 5 script); start the agent; `efm-cluster-status.sh` shows two nodes UP |
-| 9 | Start a new WAL archive and take the first EPAS 17 backup | primary | The EPAS 15 backups cannot be restored on 17. `06-backup`: enable-wal-archiving, take-basebackup |
-| 10 | Run the restore test once on the new backup | primary | `restore-test.sh` |
+| 9 | Start a new WAL archive and take the first EPAS 17 backup | primary | `modules/04-upgrade/epas-post-upgrade-backup.sh` does steps 9 and 10: checks archiving, moves the old version's backups into `pre-upgrade-epas<old>-<time>/`, proves archiving with a WAL switch, takes the backup. The EPAS 15 backups cannot be restored on 17 |
+| 10 | Run the restore test once on the new backup | primary | Done by the same script (`restore-test.sh --pick latest`) |
 
 ## After sign-off
 Remove the old cluster (`/tmp/delete_old_cluster.sh` if generated) and the old standby's data
@@ -36,4 +37,4 @@ directory. Do this last: until then they are your way back.
 - Between step 6 and step 8 there is **no standby**: no failover. For a 200 GB database that is
   about an hour or two. For a very large one it can be days, and is a reason to plan it differently.
 - The standby rebuild in step 7 copies every byte over the network.
-- TDE: the new standby needs the same wrap/unwrap setup and passphrase file as the new primary.
+- TDE: the new standby needs the same wrap/unwrap setup and passphrase file as the new primary. `epas-rebuild-standby.sh` stops (copy kept) if the passphrase file is missing on the standby host. The file is never copied by `pg_basebackup`, because it lives outside the data directory: install it from your approved source first.
