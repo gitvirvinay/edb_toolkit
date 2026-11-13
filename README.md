@@ -17,7 +17,7 @@ modules/
   03-patching/        Patching: take a node out of service and bring it back (EFM or not, primary or DR site), EPAS minor updates
   04-upgrade/         Major upgrades: pg_upgrade (copy/link, TDE-aware) and pg_dump/pg_restore paths
   05-efm/             EFM cluster setup (interactive / multi-cluster), status, reconfigure after upgrade
-  06-backup/          pgBackRest validation, pre-patch snapshot
+  06-backup/          pg_basebackup + WAL archiving, restore test, pgBackRest validation, pre-patch snapshot
   07-tuning/          Kernel HugePages/memory tuning, shared_buffers planning, verification, sql/ monitoring
   08-tde/             TDE with Thales CipherTrust (KMIP): new setup, openssl-passphrase → Thales migration
 tools/                get-edb-inventory.sh — what EDB software/config is on this host
