@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # tests/common-unit.sh - unit tests for the settings check in lib/common.sh and for
-# HA_TOOL in the 03-patching scripts.
+# HA_TOOL and SITE in the 03-patching scripts.
 #
 # No database, no root, nothing is really started or stopped: sudo, systemctl, pg_isready,
 # efm and ip are replaced by fakes that only record how they were called.
@@ -53,7 +53,7 @@ FAKE
 printf '#!/bin/sh\necho "dnf $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/dnf"
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/pg_isready"
 printf '#!/bin/sh\necho "efm $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/efm"
-printf '#!/bin/sh\nexit 0\n' > "$T/bin/ip"
+printf '#!/bin/sh\necho "ip $*" >> "%s/ipcalls"\nexit 0\n' "$T" > "$T/bin/ip"
 chmod +x "$T"/bin/*
 
 # env_file LINES... - write a config file with the minimum the patching scripts need, plus LINES
@@ -71,7 +71,7 @@ env_file() {
 }
 # run SCRIPT - run a toolkit script with the fakes first on PATH, not from a terminal (no question asked)
 run() {
-    : > "$T/calls"
+    : > "$T/calls"; : > "$T/ipcalls"
     env -u TOOLKIT_LOG_FILE -u HA_TOOL -u SITE -u BACKUP_TOOL -u APP_CODE \
         PATH="$T/bin:$PATH" bash "$ROOT/$1" --env "$T/site.env" </dev/null 2>&1
 }
@@ -103,27 +103,36 @@ has "wrong SITE reported"                  "SITE='secondary' (allowed: primary, 
 has "wrong BACKUP_TOOL in the same message" "BACKUP_TOOL='tape' (allowed: basebackup, barman, pgbackrest, none)" "$out"
 has "wrong APP_CODE in the same message"   "APP_CODE='PAY 01' (letters, digits, _ and - only)" "$out"
 env_file 'HA_TOOL="patroni"'
-out=$(run modules/03-patching/primary_site/patch-primary-shutdown.sh); rc=$?
+out=$(run modules/03-patching/node-maintenance-stop.sh); rc=$?
 eq "a patching script stops on a wrong setting"  "1" "$rc"
 eq "... before it calls systemctl"               "" "$(calls)"
 
+down="modules/03-patching/node-maintenance-stop.sh"
+up="modules/03-patching/node-maintenance-start.sh"
 for site in primary dr; do
-    down="modules/03-patching/${site}_site/patch-${site}-shutdown.sh"
-    up="modules/03-patching/${site}_site/patch-${site}-startup.sh"
+    site_line="SITE=\"${site}\""
 
     echo "== ${site} site, HA_TOOL=efm (the default): as before"
-    env_file
+    env_file "$site_line"
     out=$(run "$down"); rc=$?
     eq "shutdown: exit code 0"                  "0" "$rc"
     eq "shutdown: EFM stopped and disabled, then EPAS stopped" \
        "systemctl stop edb-efm-5.3;systemctl disable edb-efm-5.3;systemctl stop edb-as-17;" "$(calls)"
+    has "shutdown: audit line names the site"   "Node stopped for maintenance: $(hostname -s) (${site} site)" "$out"
+    if [ "$site" = "primary" ]; then
+        has   "shutdown: primary site lists the IP addresses"  "ip addr show" "$(cat "$T/ipcalls")"
+    else
+        eq    "shutdown: DR site does not list IP addresses"   "" "$(cat "$T/ipcalls")"
+    fi
     out=$(run "$up"); rc=$?
     eq "startup: exit code 0"                   "0" "$rc"
     has "startup: EPAS started, then EFM enabled and started" \
        "systemctl start edb-as-17;systemctl enable edb-efm-5.3;systemctl start edb-efm-5.3;" "$(calls)"
+    has "startup: waits for EFM to report the cluster"  "efm cluster-status efm;" "$(calls)"
+    has "startup: audit line names the site"            "Node back in service after maintenance: $(hostname -s) (${site} site)" "$out"
 
     echo "== ${site} site, HA_TOOL=none: EFM is left alone"
-    env_file 'HA_TOOL="none"'
+    env_file "$site_line" 'HA_TOOL="none"'
     out=$(run "$down"); rc=$?
     eq "shutdown: exit code 0"                  "0" "$rc"
     eq "shutdown: only EPAS is stopped"         "systemctl stop edb-as-17;" "$(calls)"
@@ -142,7 +151,7 @@ for site in primary dr; do
     rm -f "$T/agents"
 
     echo "== ${site} site: a stop that fails is not ignored"
-    env_file
+    env_file "$site_line"
     echo "stop edb-efm-5.3" > "$T/fail"
     out=$(run "$down"); rc=$?
     eq "EFM stop fails: exit code 1"               "1" "$rc"
@@ -165,32 +174,49 @@ for site in primary dr; do
     out=$(run "$down"); rc=$?
     eq "everything stops: exit code 0"             "0" "$rc"
     has "everything stops: audit line written"     "[AUDIT]" "$out"
+
+    echo "== ${site} site: a start that fails is not ignored"
+    echo "start edb-as-17" > "$T/fail"
+    out=$(run "$up"); rc=$?
+    eq "EPAS start fails: exit code 1"             "1" "$rc"
+    eq "EPAS start fails: EFM is NOT enabled or started" "systemctl start edb-as-17;" "$(calls)"
+    has "EPAS start fails: says so"                "Could not start edb-as-17 - EFM NOT started" "$out"
+    rm -f "$T/fail"
 done
 
-echo "== epas-minor-patch-update.sh (for a node without EFM)"
+echo "== epas-minor-update.sh (for a node without EFM)"
 env_file 'HA_TOOL="none"'
 echo "edb-efm-5.3.service" > "$T/agents"
-out=$(run modules/03-patching/epas-minor-patch-update.sh); rc=$?
+out=$(run modules/03-patching/epas-minor-update.sh); rc=$?
 eq "EFM agent running: refuses (exit code 1)"      "1" "$rc"
 has "EFM agent running: names the agent"           "An EFM agent is running on this host (edb-efm-5.3.service)" "$out"
-has "EFM agent running: points to the EFM script"  "efm-rolling-minor-patch.sh" "$out"
+has "EFM agent running: points to the EFM script"  "epas-minor-update-efm.sh" "$out"
 eq "EFM agent running: nothing is stopped"         "" "$(calls)"
 env_file 'HA_TOOL="efm"'
-out=$(run modules/03-patching/epas-minor-patch-update.sh); rc=$?
+out=$(run modules/03-patching/epas-minor-update.sh); rc=$?
 eq "refused on an EFM node whatever HA_TOOL says"  "1" "$rc"
 eq "... and nothing is stopped"                    "" "$(calls)"
 rm -f "$T/agents"
 if [ "$(id -u)" -ne 0 ]; then
-    out=$(run modules/03-patching/epas-minor-patch-update.sh)
+    out=$(run modules/03-patching/epas-minor-update.sh)
     has "no agent: the EFM check passes (next stop is the root check)" "Run as root" "$out"
 fi
 
-echo "== efm-rolling-minor-patch.sh"
+echo "== epas-minor-update-efm.sh"
 env_file 'HA_TOOL="none"'
-out=$(run modules/03-patching/efm-rolling-minor-patch.sh); rc=$?
+out=$(run modules/03-patching/epas-minor-update-efm.sh); rc=$?
 eq "HA_TOOL=none: refuses (exit code 1)"        "1" "$rc"
-has "HA_TOOL=none: points to the single-node script" "epas-minor-patch-update.sh" "$out"
+has "HA_TOOL=none: points to the single-node script" "epas-minor-update.sh" "$out"
 eq "HA_TOOL=none: nothing is stopped"           "" "$(calls)"
+
+echo "== The old names are gone"
+for old in primary_site/patch-primary-shutdown.sh primary_site/patch-primary-startup.sh dr_site/patch-dr-shutdown.sh \
+           dr_site/patch-dr-startup.sh epas-minor-patch-update.sh efm-rolling-minor-patch.sh; do
+    [[ ! -e "modules/03-patching/$old" ]]; eq "no $old" 0 $?
+done
+out=$(grep -rlE 'patch-(primary|dr)-(shutdown|startup)|epas-minor-patch-update|efm-rolling-minor-patch' \
+      --include='*.sh' --include='*.example' --include='epas-automation' modules lib tools conf 2>/dev/null | tr '\n' ' ')
+eq "no script or config still refers to an old name" "" "$out"
 
 echo "== Template (conf/site.env.example)"
 out=$(bash -c 'set -u; source conf/site.env.example; echo "$APP_CODE|$SITE|$HA_TOOL|$BACKUP_TOOL"' 2>&1)

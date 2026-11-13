@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# efm-rolling-minor-patch.sh — patch one EFM cluster node:
+# epas-minor-update-efm.sh — update the EPAS packages on one node of an EFM cluster (rolling):
 # VIP check, stop EFM, stop EPAS, dnf upgrade, start EPAS, start EFM, check cluster & VIP.
 set -euo pipefail
 
@@ -20,7 +20,7 @@ USAGE
 parse_common_args "$@"; set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 case "${1:-}" in -h|--help) usage ;; "") ;; *) die "Unknown option: $1 (see --help)" ;; esac
 load_env required
-[ "$HA_TOOL" = "efm" ] || die "This script patches one node of an EFM cluster, but HA_TOOL=${HA_TOOL} in ${ENV_SOURCE}. For a cluster without EFM use ${SCRIPT_DIR}/epas-minor-patch-update.sh. Nothing was changed."
+[ "$HA_TOOL" = "efm" ] || die "This script patches one node of an EFM cluster, but HA_TOOL=${HA_TOOL} in ${ENV_SOURCE}. For a cluster without EFM use ${SCRIPT_DIR}/epas-minor-update.sh. Nothing was changed."
 require_root
 
 VIP_INTERFACE="${VIP_INTERFACE:-eth0}"
