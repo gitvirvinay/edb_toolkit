@@ -12,3 +12,5 @@ jobs:
       - run: bash tests/epas-layout-unit.sh
       - run: bash tests/logger-unit.sh
       - run: bash tests/common-unit.sh
+      - run: bash tests/backup-unit.sh
+      - run: bash tests/restore-test-unit.sh

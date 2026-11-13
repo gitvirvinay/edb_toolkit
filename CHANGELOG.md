@@ -4,6 +4,18 @@ What changed in edb_toolkit, newest first. Updated together with every change.
 
 ## Unreleased
 
+- **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the
+  latest backup (or `--pick random`), checks free space, tablespaces, the TDE passphrase file and
+  `pg_verifybackup`, copies the backup, replays **all** archived WAL on a small temporary instance
+  (its own port, `archive_mode=off` so it can never write into the real archive) and checks the
+  instance is out of recovery and can write. A pass deletes the copy; a failure keeps it, and no new
+  test starts until it is cleared with `--remove-kept`. Every run leaves an evidence file in
+  `<log directory>/restore-tests/`. Never reads, prints or copies the TDE passphrase.
+  New optional settings: `RESTORE_TEST_TIMEOUT_HOURS`, `RESTORE_TEST_PORT`, `RESTORE_TEST_KEEP_MAX`,
+  `RESTORE_TOP`, `RESTORE_EVIDENCE_DIR`. Not yet run against a real EPAS server.
+- CI now also runs `tests/backup-unit.sh` (it was only run by `make test`) and the new
+  `tests/restore-test-unit.sh`.
+
 - **New backup module for `BACKUP_TOOL=basebackup`** (`modules/06-backup/`):
   - `enable-wal-archiving.sh` stages `conf.d/06-archiving.conf` (`archive_mode=on`, `archive_command`
     → `ARCHIVE_TOP`). Called automatically from `epas-base-build-db.sh` for a new cluster; also safe
