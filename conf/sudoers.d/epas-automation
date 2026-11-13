@@ -11,7 +11,7 @@
 # SSL passphrase support via systemd-ask-password
 enterprisedb ALL=(root) NOPASSWD: /bin/systemd-ask-password
 
-# EPAS service control (versions 15, 16, 17)
+# EPAS service control (versions 15, 16, 17, 18)
 Cmnd_Alias EPAS_CTL = \
     /bin/systemctl start edb-as-15,   /bin/systemctl start edb-as-15.service, \
     /bin/systemctl stop edb-as-15,    /bin/systemctl stop edb-as-15.service, \
@@ -24,7 +24,11 @@ Cmnd_Alias EPAS_CTL = \
     /bin/systemctl start edb-as-17,   /bin/systemctl start edb-as-17.service, \
     /bin/systemctl stop edb-as-17,    /bin/systemctl stop edb-as-17.service, \
     /bin/systemctl restart edb-as-17, /bin/systemctl restart edb-as-17.service, \
-    /bin/systemctl reload edb-as-17,  /bin/systemctl reload edb-as-17.service
+    /bin/systemctl reload edb-as-17,  /bin/systemctl reload edb-as-17.service, \
+    /bin/systemctl start edb-as-18,   /bin/systemctl start edb-as-18.service, \
+    /bin/systemctl stop edb-as-18,    /bin/systemctl stop edb-as-18.service, \
+    /bin/systemctl restart edb-as-18, /bin/systemctl restart edb-as-18.service, \
+    /bin/systemctl reload edb-as-18,  /bin/systemctl reload edb-as-18.service
 enterprisedb ALL=(root) NOPASSWD: EPAS_CTL
 
 # EFM service control (explicit targets - no wildcards, which would allow privilege escalation).
