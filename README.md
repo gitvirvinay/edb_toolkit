@@ -14,7 +14,7 @@ lib/logger.sh         central logger: screen + one file per run in <LOG_MOUNT>/t
 modules/
   01-provision/       Day-1 build (/u001 layout or symlink variant), primary prep, standby rebuild, env generator
   02-ssl/             SSL/TLS setup, self-signed single/SAN bundles, ssl.conf migration, tests/
-  03-patching/        Minor patching: primary_site/ & dr_site/ sequences, single-node update, EFM rolling patch
+  03-patching/        Patching: take a node out of service and bring it back (EFM or not, primary or DR site), EPAS minor updates
   04-upgrade/         Major upgrades: pg_upgrade (copy/link, TDE-aware) and pg_dump/pg_restore paths
   05-efm/             EFM cluster setup (interactive / multi-cluster), status, reconfigure after upgrade
   06-backup/          pgBackRest validation, pre-patch snapshot

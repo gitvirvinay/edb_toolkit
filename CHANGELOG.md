@@ -4,20 +4,32 @@ What changed in edb_toolkit, newest first. Updated together with every change.
 
 ## Unreleased
 
-- **Clusters without EFM can now be patched with the shutdown and startup scripts.** New setting
-  `HA_TOOL` in `site.env` (`efm` or `none`, default `efm`). With `none`, the four
-  `patch-*-shutdown.sh` / `patch-*-startup.sh` scripts skip the EFM steps, and
-  `efm-rolling-minor-patch.sh` stops and points to `epas-minor-patch-update.sh`.
-  Safety check: with `none`, the shutdown scripts refuse to stop EPAS if an EFM agent is
-  running on the host after all.
-- **Patching safety.** The shutdown scripts no longer ignore a failed stop: if EFM or EPAS
-  cannot be stopped, or EPAS is still running afterwards, they stop with an error and write
-  no audit line. EPAS is never stopped when EFM could not be stopped and disabled first.
-- `epas-minor-patch-update.sh` refuses to run while an EFM agent is active on the host and
-  points to `efm-rolling-minor-patch.sh` (stopping EPAS under a running agent can cause a
-  failover).
-- New settings `APP_CODE`, `SITE` (`primary`, `dr`) and `BACKUP_TOOL` (`basebackup`, `barman`,
-  `pgbackrest`, `none`). They are checked but not used by any script yet.
+- **Breaking: the patching scripts are renamed, and four became two.** One pair of scripts now
+  serves both sites, with or without EFM; `SITE` and `HA_TOOL` in `site.env` decide what they do.
+  The `primary_site/` and `dr_site/` folders are gone. Update runbooks that use the old names:
+
+  | Old name | New name (in `modules/03-patching/`) |
+  |---|---|
+  | `primary_site/patch-primary-shutdown.sh`, `dr_site/patch-dr-shutdown.sh` | `node-maintenance-stop.sh` |
+  | `primary_site/patch-primary-startup.sh`, `dr_site/patch-dr-startup.sh` | `node-maintenance-start.sh` |
+  | `epas-minor-patch-update.sh` | `epas-minor-update.sh` |
+  | `efm-rolling-minor-patch.sh` | `epas-minor-update-efm.sh` |
+
+- New setting `SITE` (`primary` or `dr`, default `primary`). `node-maintenance-stop.sh` lists the
+  node's IP addresses only at the primary site. `node-maintenance-start.sh` now waits for EFM to
+  report the cluster at the DR site too (before, only at the primary site).
+- **Clusters without EFM can be taken out of service and brought back with the same scripts.**
+  New setting `HA_TOOL` (`efm` or `none`, default `efm`). With `none`, the `node-maintenance-*`
+  scripts skip the EFM steps, and `epas-minor-update-efm.sh` stops and points to
+  `epas-minor-update.sh`. Safety check: with `none`, `node-maintenance-stop.sh` refuses to stop
+  EPAS if an EFM agent is running on the host after all.
+- **Patching safety.** A failed stop or start is no longer ignored: if EFM or EPAS cannot be
+  stopped, or EPAS is still running afterwards, `node-maintenance-stop.sh` stops with an error
+  and writes no audit line. EPAS is never stopped when EFM could not be stopped and disabled first.
+- `epas-minor-update.sh` refuses to run while an EFM agent is active on the host and points to
+  `epas-minor-update-efm.sh` (stopping EPAS under a running agent can cause a failover).
+- New settings `APP_CODE` and `BACKUP_TOOL` (`basebackup`, `barman`, `pgbackrest`, `none`).
+  They are checked but not used by any script yet.
 - Every script that loads `site.env` now stops at the start, before changing anything, when
   one of these settings has a value outside its list.
 - A config file without the new settings behaves exactly as before.

@@ -6,14 +6,15 @@ Each run prints the settings it will use, then asks **"Proceed? (y/N)"** when ru
 
 | Script | Run as / where | Purpose |
 |---|---|---|
-| `primary_site/patch-primary-shutdown.sh` | user with sudo, each primary-site node | Stop & disable EFM, show VIPs, stop EPAS (it stays enabled) before patching |
-| `primary_site/patch-primary-startup.sh` | user with sudo, each primary-site node | Start EPAS, wait for it on `PRIMARY_PORT`, then start EFM and check cluster status. **EFM is not started if EPAS does not come up within 60 s.** |
-| `dr_site/patch-dr-shutdown.sh` | user with sudo, each DR node | Stop & disable EFM, then EPAS |
-| `dr_site/patch-dr-startup.sh` | user with sudo, each DR node | Start EPAS, wait for it, then start EFM (same 60 s safety stop) |
-| `epas-minor-patch-update.sh [<version>]` | **root**, single node | Stop service, `dnf upgrade edb-as<version>-server*`, restart, run `edb_sqlpatch`. Version defaults to `EPAS_VERSION`. |
-| `efm-rolling-minor-patch.sh` | **root**, each EFM node in turn | VIP check → stop the **local** EFM agent only → stop EPAS → `dnf upgrade edb-as<EPAS_VERSION>*` → start EPAS (60 s safety stop) → start EFM → cluster & VIP check |
+| `node-maintenance-stop.sh` | user with sudo, on the node | Take this node out of service before OS patching or a reboot: stop & disable EFM, list the IP addresses (`SITE="primary"` only), stop EPAS (it stays enabled) and confirm it is down |
+| `node-maintenance-start.sh` | user with sudo, on the node | Bring it back: start EPAS, wait for it on `PRIMARY_PORT`, then enable & start EFM and wait for it to report the cluster. **EFM is not started if EPAS does not come up within 60 s.** |
+| `epas-minor-update.sh [<version>]` | **root**, a node without EFM | Stop service, `dnf upgrade edb-as<version>-server*`, restart, run `edb_sqlpatch`. Version defaults to `EPAS_VERSION`. Refuses to run while an EFM agent is active on the host. |
+| `epas-minor-update-efm.sh` | **root**, each EFM node in turn | VIP check → stop the **local** EFM agent only → stop EPAS → `dnf upgrade edb-as<EPAS_VERSION>*` → start EPAS (60 s safety stop) → start EFM → cluster & VIP check |
 
-Settings used (`conf/site.env`): `EPAS_VERSION`, `EFM_VERSION`, `EFM_CLUSTER_NAME`, `SYSTEM_USER`, `PRIMARY_PORT`, `SRC_BINARY_DIR` (for `pg_isready`), `VIP_INTERFACE`, `VIP_ADDRESS`, `HA_TOOL`. The `efm` command is taken from `/usr/edb/efm-<EFM_VERSION>/bin/efm` (or `EFM_BIN`).
+The same two `node-maintenance-*` scripts are used at both sites and with or without EFM;
+`SITE` and `HA_TOOL` in `conf/site.env` decide what they do.
+
+Settings used (`conf/site.env`): `EPAS_VERSION`, `EFM_VERSION`, `EFM_CLUSTER_NAME`, `SYSTEM_USER`, `PRIMARY_PORT`, `SRC_BINARY_DIR` (for `pg_isready`), `VIP_INTERFACE`, `VIP_ADDRESS`, `HA_TOOL`, `SITE`. The `efm` command is taken from `/usr/edb/efm-<EFM_VERSION>/bin/efm` (or `EFM_BIN`).
 
 ## Clusters without EFM (`HA_TOOL="none"`)
 
@@ -21,18 +22,18 @@ Set `HA_TOOL="none"` in `conf/site.env` for a cluster that has no failover manag
 
 | Script | With `HA_TOOL="none"` |
 |---|---|
-| the two `*-shutdown.sh` scripts | Skip the EFM steps and stop EPAS. They first check that no EFM agent is running on the host and stop if one is: stopping EPAS under a running agent can cause a failover. |
-| the two `*-startup.sh` scripts | Start EPAS, wait for it, skip the EFM steps. |
-| `efm-rolling-minor-patch.sh` | Stops at once and points to `epas-minor-patch-update.sh`. |
-| `epas-minor-patch-update.sh` | The script for these clusters. It never touches EFM, and refuses to run if an EFM agent is active on the host. |
+| `node-maintenance-stop.sh` | Skips the EFM steps and stops EPAS. It first checks that no EFM agent is running on the host and stops if one is: stopping EPAS under a running agent can cause a failover. |
+| `node-maintenance-start.sh` | Starts EPAS, waits for it, skips the EFM steps. |
+| `epas-minor-update-efm.sh` | Stops at once and points to `epas-minor-update.sh`. |
+| `epas-minor-update.sh` | The script for these clusters. It never touches EFM, and refuses to run if an EFM agent is active on the host. |
 
 The default is `HA_TOOL="efm"`, so a config file without the setting behaves as before.
 
 ## When a stop fails
 
-The shutdown scripts stop with an error, and write no audit line, when EFM or EPAS cannot be
+`node-maintenance-stop.sh` stops with an error, and writes no audit line, when EFM or EPAS cannot be
 stopped or EPAS is still running afterwards. EPAS is never stopped if EFM could not be stopped
-and disabled first. A stop of a service that is already stopped is not an error, so the scripts
+and disabled first. A stop of a service that is already stopped is not an error, so the script
 can be run again.
 
-Typical order: DR site shutdown → patch → DR startup, then the primary site the same way.
+Typical order: on each DR node `node-maintenance-stop.sh` → patch → `node-maintenance-start.sh`, then the primary site the same way.
