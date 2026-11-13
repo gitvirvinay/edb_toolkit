@@ -258,6 +258,75 @@ eq   "test port already in use: refused"                 "1" "$rc"
 has  "port in use: says so"                              "already answers on port" "$out"
 eq   "port in use: nothing was copied"                   "0" "$(find "$T/backup/restore-test" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
 
+echo "== restore-test.sh: evidence, and delete-on-pass / keep-on-failure (step 3)"
+ev() { cat "$T"/logs/restore-tests/*"$1".txt 2>/dev/null; }
+reset; mkbackup 2026-11-10_020000_scheduled
+out=$(run); rc=$?
+eq   "pass: exit 0"                                      "0" "$rc"
+eq   "pass: the copy is deleted"                         "0" "$(find "$T/backup/restore-test" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+has  "pass: says the copy was removed"                   "Test copy removed" "$out"
+eq   "pass: one evidence file named PASS"                "1" "$(find "$T/logs/restore-tests" -name '*_as17_PASS.txt' | wc -l | tr -d ' ')"
+has  "evidence: result"                                  "restore_test_result=PASS" "$(ev PASS)"
+has  "evidence: which backup"                            "backup=2026-11-10_020000_scheduled" "$(ev PASS)"
+has  "evidence: how it was picked"                       "backup_pick=latest" "$(ev PASS)"
+has  "evidence: WAL files replayed"                      "wal_files_replayed=3" "$(ev PASS)"
+has  "evidence: what recovery reported"                  "redo done at 0/5000028" "$(ev PASS)"
+has  "evidence: copy removed"                            "copy=removed" "$(ev PASS)"
+has  "evidence: TDE off"                                 "tde=no" "$(ev PASS)"
+eq   "evidence file is mode 640"                         "640" "$(stat -c %a "$(find "$T/logs/restore-tests" -name '*PASS.txt' | head -1)")"
+has  "the log names the evidence file"                   "Evidence written" "$out"
+
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/instance_dies"
+out=$(run); rc=$?
+eq   "fail: exit 1"                                      "1" "$rc"
+eq   "fail: the copy is KEPT"                            "1" "$(find "$T/backup/restore-test" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+has  "fail: the instance log is in the kept copy"        "could not locate required checkpoint record" "$(cat "$T"/backup/restore-test/*/restore-test.log 2>/dev/null)"
+has  "fail: says where the copy is and how to clear it"  "--remove-kept" "$out"
+has  "fail: evidence named FAIL"                         "restore_test_result=FAIL" "$(ev FAIL)"
+has  "fail: evidence says why"                           "stopped before recovery finished" "$(ev FAIL)"
+has  "fail: evidence says the copy was kept"             "copy=kept for investigation" "$(ev FAIL)"
+rm -f "$T/instance_dies"
+out=$(run); rc=$?
+eq   "the kept copy blocks the next test"                "1" "$rc"
+out=$(run --remove-kept --yes); rc=$?
+eq   "--remove-kept --yes clears it"                     "0" "$rc"
+out=$(run); rc=$?
+eq   "then the next test runs and passes"                "0" "$rc"
+
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/verify_fail"
+out=$(run); rc=$?
+eq   "failed check: exit 1"                              "1" "$rc"
+has  "failed check: evidence says why"                   "damaged or incomplete" "$(ev FAIL)"
+has  "failed check: no copy was made"                    "copy=none made" "$(ev FAIL)"
+
+reset; mkbackup 2026-11-10_020000_scheduled
+out=$(run --check-only); rc=$?
+eq   "--check-only leaves no evidence"                   "0" "$(find "$T/logs/restore-tests" -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+reset; mkbackup 2026-11-10_020000_scheduled
+mkdir -p "$T/tde"; echo "SECRETPASSPHRASE" > "$T/tde/as17.pass"
+printf "data_encryption_key_unwrap_command = 'openssl enc -d -pass file:%s/as17.pass -in %%p'\n" "$T/tde" > "$T/backup/2026-11-10_020000_scheduled/postgresql.conf"
+env_file 'BACKUP_TOOL="basebackup"' "RESTORE_EVIDENCE_DIR=$T/evidence"
+out=$(run); rc=$?
+eq   "TDE backup: passes"                                "0" "$rc"
+has  "RESTORE_EVIDENCE_DIR is honoured"                  "tde=yes" "$(cat "$T"/evidence/*PASS.txt 2>/dev/null)"
+has  "evidence names the passphrase file"                "tde_passphrase_file=$T/tde/as17.pass" "$(cat "$T"/evidence/*PASS.txt 2>/dev/null)"
+hasnt "evidence never holds the passphrase"              "SECRETPASSPHRASE" "$(cat "$T"/evidence/*PASS.txt 2>/dev/null)$out"
+rm -rf "$T/evidence"
+
+echo "== restore-test.sh: stopped half way (kill / Ctrl-C)"
+reset; mkbackup 2026-11-10_020000_scheduled; : > "$T/never_ready"
+env -u TOOLKIT_LOG_FILE RESTORE_TEST_POLL_SECS=1 PATH="$T/bin:$PATH" \
+    bash "$ROOT/modules/06-backup/restore-test.sh" --env "$T/site.env" </dev/null >"$T/bg.out" 2>&1 &
+BGPID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$T/pg_running" ] && break; sleep 1; done
+kill -TERM "$BGPID" 2>/dev/null; wait "$BGPID" 2>/dev/null; rc=$?
+eq   "killed while replaying: exit code 143"             "143" "$rc"
+eq   "killed: the temporary instance is stopped"         "0" "$([ -f "$T/pg_running" ] && echo 1 || echo 0)"
+eq   "killed: the copy is kept"                          "1" "$(find "$T/backup/restore-test" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+has  "killed: evidence says FAIL"                        "restore_test_result=FAIL" "$(ev FAIL)"
+has  "killed: evidence says why"                         "unexpectedly (exit code 143)" "$(ev FAIL)"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 (( FAIL == 0 ))

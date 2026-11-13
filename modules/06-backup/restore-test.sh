@@ -18,8 +18,19 @@
 #     listening on localhost only, so it can never write into the real WAL archive;
 #   - copies, prints or logs the TDE passphrase: it only checks that the file is there.
 #
-# STEP 1 (this part): choose the backup, then check everything BEFORE spending time on a copy:
-#   settings -> binaries -> which backup -> free space -> TDE passphrase file -> pg_verifybackup
+# HOW A RUN GOES
+#   1. choose the backup, then check everything BEFORE spending time on a copy:
+#      settings -> binaries -> which backup -> free space -> no tablespaces ->
+#      TDE passphrase file -> pg_verifybackup
+#   2. copy it into RESTORE_TOP (low priority), start a small isolated instance on the copy,
+#      replay ALL archived WAL, check the instance is out of recovery and can write
+#   3. whatever the outcome, write an evidence file; PASS deletes the copy, FAIL keeps it
+#
+# Exit code: 0 = pass, 1 = fail. Evidence: <log directory>/restore-tests/<date>_<cluster>_PASS|FAIL.txt
+# (or RESTORE_EVIDENCE_DIR). A --check-only run restores nothing and writes no evidence.
+#
+# Scheduling (cron, as SYSTEM_USER): the latest backup daily or weekly, --pick random now and then.
+# Run it outside business hours: it shares the server's disks with the live database.
 # =============================================================================
 set -euo pipefail
 
@@ -45,6 +56,7 @@ Settings (conf/site.env, all optional):
   RESTORE_TEST_PORT           port of the temporary instance (default 55432)
   RESTORE_TEST_KEEP_MAX       stop starting new tests while this many failed copies are still kept (default 1)
   RESTORE_TOP                 where the temporary copy lives (default BACKUP_TOP/restore-test)
+  RESTORE_EVIDENCE_DIR        where the evidence files go (default <log directory>/restore-tests)
 USAGE
     exit 0
 }
@@ -86,6 +98,9 @@ RESULT=""                         # pass | fail
 FAIL_REASON=""
 BACKUP_DIR=""; BACKUP_NAME=""; BACKUP_BYTES=0
 TDE_FOUND=0; TDE_PASS_PATH=""
+RESTORE_DIR=""; RESTORE_LOG=""; SOCK_DIR=""; STARTED=0
+WAL_FILES=0; REDO_LINE=""; LAST_TX=""; COPY_STATE="none made"
+START_STAMP="$(date +%Y%m%d-%H%M%S)"; START_ISO="$(date -Is)"
 
 # fail_run "reason" - stop this run as a FAILURE, saying why (step 3 records it as evidence).
 fail_run() { FAIL_REASON="$*"; die "$*"; }
@@ -163,6 +178,106 @@ fi
 BACKUP_NAME="$(basename "$BACKUP_DIR")"
 show_config CLUSTER_NAME BACKUP_TOP ARCHIVE_TOP RESTORE_TOP RESTORE_TEST_PORT RESTORE_TEST_TIMEOUT_HOURS
 log_info "Backup chosen (--pick ${PICK}, ${#CANDIDATES[@]} complete backup(s) on disk): ${BACKUP_NAME}"
+# =============================================================================
+# STEP 3: whatever happens, leave evidence, and clean up by one rule:
+#   PASS -> the temporary copy is deleted (it has served its purpose)
+#   FAIL -> the copy is kept, so you can look at the instance log and the files
+# =============================================================================
+# remove_copy DIR - delete a copy this script made. Refuses anything that is not
+# exactly <RESTORE_TOP>/<date>_<time>_of_<backup name>, so a wrong variable can never delete real data.
+remove_copy() {
+    local d="$1"
+    case "$d" in
+        "${RESTORE_TOP%/}"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*_of_*) ;;
+        *) log_warn "Not removing ${d}: it is not where this script makes restore copies."; return 1 ;;
+    esac
+    rm -rf "$d"
+}
+
+# evidence_dir - where the proof of each run goes: next to the toolkit logs, else beside the backups.
+evidence_dir() {
+    local d="${RESTORE_EVIDENCE_DIR:-}" l
+    if [ -z "$d" ]; then
+        l="$(log_dir)"
+        if [ -n "$l" ] && [ -d "$l" ] && [ -w "$l" ]; then d="${l}/restore-tests"; else d="${BACKUP_TOP}/restore-tests"; fi
+    fi
+    printf '%s\n' "$d"
+}
+
+# write_evidence - one small text file per run: what was tested, how it ended, how long it took.
+# It holds no secret: the passphrase FILE'S PATH is named, never what is inside it.
+write_evidence() {
+    local dir file res
+    dir="$(evidence_dir)"
+    res="$(printf '%s' "$RESULT" | tr '[:lower:]' '[:upper:]')"
+    file="${dir}/${START_STAMP}_${CLUSTER_NAME}_${res}.txt"
+    if ! ( umask 027; mkdir -p "$dir" && cat > "$file" ) 2>/dev/null <<EVIDENCE
+restore_test_result=${res}
+cluster=${CLUSTER_NAME}
+host=$(hostname -s 2>/dev/null || hostname)
+epas_version=${EPAS_VERSION}
+app_code=${APP_CODE:-}
+started=${START_ISO}
+finished=$(date -Is)
+duration_seconds=${SECONDS}
+backup=${BACKUP_NAME}
+backup_pick=${PICK}
+backup_size_bytes=${BACKUP_BYTES}
+tde=$([ "$TDE_FOUND" = "1" ] && echo yes || echo no)
+tde_passphrase_file=${TDE_PASS_PATH:-}
+wal_files_replayed=${WAL_FILES}
+recovery=${REDO_LINE}
+last_transaction=${LAST_TX}
+timeout_hours=${RESTORE_TEST_TIMEOUT_HOURS}
+copy=${COPY_STATE}
+failure_reason=${FAIL_REASON}
+toolkit_log=${TOOLKIT_LOG_FILE:-}
+EVIDENCE
+    then
+        log_warn "Could not write the evidence file in ${dir}. The result is in the log above."
+        return 0
+    fi
+    log_info "Evidence written: ${file}"
+    log_audit "Restore test ${res}: ${BACKUP_NAME}; evidence ${file}"
+}
+
+# on_exit - runs when the script ends for ANY reason (success, failure, Ctrl-C, an unexpected error).
+on_exit() {
+    local rc=$?
+    set +e
+    # 1. never leave the temporary instance running, never leave its socket folder behind
+    if [ "$STARTED" = "1" ] && [ -n "$RESTORE_DIR" ] && "${BIN}/pg_ctl" status -D "$RESTORE_DIR" >/dev/null 2>&1; then
+        "${BIN}/pg_ctl" stop -D "$RESTORE_DIR" -m immediate -w -t 60 >/dev/null 2>&1
+    fi
+    if [ -n "$SOCK_DIR" ]; then rm -rf "$SOCK_DIR"; fi
+    # 2. a run that did not reach its own "pass" is a failure
+    if [ -z "$RESULT" ]; then
+        RESULT="fail"
+        [ -n "$FAIL_REASON" ] || FAIL_REASON="the script stopped unexpectedly (exit code ${rc})"
+    fi
+    # 3. the copy: deleted on a pass, kept on a failure
+    if [ -n "$RESTORE_DIR" ] && [ -d "$RESTORE_DIR" ]; then
+        if [ "$RESULT" = "pass" ]; then
+            if remove_copy "$RESTORE_DIR"; then
+                COPY_STATE="removed"; log_info "Test copy removed: ${RESTORE_DIR}"
+            else
+                COPY_STATE="kept (could not be removed): ${RESTORE_DIR}"
+            fi
+        else
+            COPY_STATE="kept for investigation: ${RESTORE_DIR}"
+            log_warn "Test FAILED. The copy is kept for investigation: ${RESTORE_DIR} (instance log: ${RESTORE_LOG:-none}). When done:  $0 --remove-kept"
+        fi
+    else
+        COPY_STATE="none made"
+    fi
+    # 4. evidence (a --check-only run proved nothing about restoring, so it leaves none)
+    if [ "$RESULT" != "checks-only" ]; then write_evidence; fi
+    return 0
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
 [ -d "$ARCHIVE_TOP" ] || fail_run "ARCHIVE_TOP ${ARCHIVE_TOP} does not exist - there is no WAL to replay."
 
 # --- Check 1: free space ---------------------------------------------------------------------------
@@ -222,6 +337,7 @@ else
 fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
+    RESULT="checks-only"
     log_info "--check-only: all checks passed for ${BACKUP_NAME}. Nothing was restored."
     exit 0
 fi
@@ -232,25 +348,13 @@ fi
 # =============================================================================
 RESTORE_DIR="${RESTORE_TOP}/$(date +%F_%H%M%S)_of_${BACKUP_NAME}"
 RESTORE_LOG="${RESTORE_DIR}/restore-test.log"
-SOCK_DIR=""; STARTED=0
 TIMEOUT_SECS="${RESTORE_TEST_TIMEOUT_SECS:-$TIMEOUT_SECS}"     # RESTORE_TEST_TIMEOUT_SECS and ..._POLL_SECS: for the unit tests
 POLL_SECS="${RESTORE_TEST_POLL_SECS:-10}"
-WAL_FILES=0; REDO_LINE=""; LAST_TX=""
 
 # The test runs on the same server as the real database: ask the OS to give production the
 # first call on CPU and disk. nice = CPU, ionice class 2 level 7 = lowest priority for disk.
 LOWPRIO=(nice -n 19)
 if command -v ionice >/dev/null 2>&1; then LOWPRIO+=(ionice -c2 -n7); fi
-
-# Whatever happens - success, failure, Ctrl-C - the temporary instance is stopped and its
-# socket folder removed. (The copy itself is handled in step 3.)
-cleanup() {
-    if [ "$STARTED" = "1" ] && "${BIN}/pg_ctl" status -D "$RESTORE_DIR" >/dev/null 2>&1; then
-        "${BIN}/pg_ctl" stop -D "$RESTORE_DIR" -m immediate -w -t 60 >/dev/null 2>&1 || true
-    fi
-    if [ -n "$SOCK_DIR" ]; then rm -rf "$SOCK_DIR"; fi
-}
-trap cleanup EXIT
 
 # Is something already listening on the test port? pg_isready: 0 accepting, 1 starting up,
 # 2 no answer. Only 2 means the port is free.
@@ -339,7 +443,5 @@ log_info "Replayed ${WAL_FILES} archived WAL file(s). ${REDO_LINE}${LAST_TX:+; $
     || log_warn "The temporary instance did not stop cleanly; the exit handler will stop it hard."
 RESULT="pass"
 log_info "RESTORE TEST PASSED: ${BACKUP_NAME} restores and its WAL replays ($(( SECONDS )) s in all)."
-log_audit "Restore test PASSED: ${BACKUP_NAME}"
-log_info "The copy is still in ${RESTORE_DIR} (removing it is added in the next change)."
-exit 0
+exit 0                                     # on_exit removes the copy and writes the evidence
 # <<< RESTORE (step 2)
