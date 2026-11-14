@@ -2,7 +2,51 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
-## Unreleased
+## v3.0.0 - 2026-11-13
+
+**Breaking: root and DBA are split.** The sysadmin does the root work (dnf, files in `/etc`, mounts, kernel, sudoers); the DBA runs everything
+else as `enterprisedb` through the sudo whitelist, with no `su` and no `sudo -u` inside any script (the TDE/Thales scripts are the one
+exception until the POC settles). See `docs/who-runs-what.md`. What to change in your runbooks:
+
+| Before | Now |
+|---|---|
+| `sudo epas-minor-update.sh` / `sudo epas-minor-update-efm.sh` | DBA `node-maintenance-stop.sh` -> sysadmin `dnf upgrade -y 'edb-as<ver>*'` -> DBA `node-maintenance-start.sh --patched` |
+| `epas-major-pgupgrade.sh --root`, `epas-major-pgrestore.sh --root` | run as `enterprisedb`; the sysadmin installs the new packages first |
+| `sudo efm-setup.sh [--no-install] [--start]` | DBA `efm-setup.sh` prepares the files; sysadmin runs the printed `dnf` and `install` commands; DBA starts the agent with `sudo systemctl` |
+| `sudo efm-reconfigure-after-upgrade.sh` | DBA `efm-reconfigure-after-upgrade.sh` prepares the file; sysadmin runs the printed `install`; DBA runs it again to confirm |
+| `sudo epas-base-build.sh` (wrapper) | `epas-base-build-root.sh` (sysadmin), then `epas-base-build-db.sh` (DBA) |
+| sudoers: EPAS 15-17 | `conf/sudoers.d/epas-automation` now also lists EPAS 18; the sysadmin re-installs it once per server |
+
+Also in this release (since v2.0.0): the backup module, the restore test, the EPAS 17 upgrade (Track A) and the EFM guard in the upgrade script.
+
+- **Breaking: root and DBA split in patching. `epas-minor-update.sh` and `epas-minor-update-efm.sh` are removed.**
+  They ran as root and called `dnf` in the middle of a run. The sysadmin now runs `dnf`; the DBA runs only
+  `node-maintenance-stop.sh` and `node-maintenance-start.sh --patched`, using the sudo whitelist
+  (`conf/sudoers.d/epas-automation`) and no root of their own. Steps: stop (DBA) -> `dnf upgrade -y 'edb-as<ver>*'` (sysadmin) -> start `--patched` (DBA).
+  | Removed | Use instead |
+  |---|---|
+  | `epas-minor-update.sh`, `epas-minor-update-efm.sh` | `node-maintenance-stop.sh`, sysadmin `dnf`, `node-maintenance-start.sh --patched` |
+  - `node-maintenance-stop.sh` notes the installed package version once EPAS is stopped.
+  - `node-maintenance-start.sh --patched` checks that the version changed (starts nothing if not), runs
+    `edb_sqlpatch` as the DBA on a primary only (not on a standby), and only then starts EFM. Without `--patched`, behaviour is unchanged.
+  - The VIP check is information only now (and silent when `VIP_ADDRESS` is empty); the old "continue despite missing VIP?" question is gone.
+  - `lib/common.sh`: new `run_as_db_user` (runs directly when already the DB user, no `sudo -u`); `wait_for_epas` uses it; new `epas_cmd`.
+  - **Breaking: `epas-major-pgupgrade.sh` and `epas-major-pgrestore.sh` no longer have `--root`.** They run as the database OS user only
+    (they already did by default); the sysadmin installs the EPAS packages beforehand. `--root` now stops with a message saying so.
+  - **`efm-reconfigure-after-upgrade.sh` no longer runs as root and no longer edits `/etc`.** The DBA runs it: it reads the properties
+    file, builds the corrected copy in `<log directory>/efm/` (mode 600) and prints the two commands for the sysadmin (backup, then
+    `install -o <owner> -g <group> -m <mode>`). Running it again says "already up to date" once the sysadmin has done that.
+    New `tests/efm-reconfigure-unit.sh` (27 tests), added to `make test` and CI.
+  - **Breaking: `efm-setup.sh` no longer runs as root, installs nothing and has no `--no-install` / `--start`.** The DBA runs it: it builds the
+    properties, nodes and (for a cluster not named `efm`) unit file in `<log directory>/efm/<cluster>/`, compares them with the installed
+    files and prints the root commands for the sysadmin (`dnf install`, backup, `install -o efm -g efm -m 600 ...`, `daemon-reload`).
+    Running it again says "already installed". The DBA starts the agent with `sudo systemctl enable/start <unit>` (whitelist).
+    New `tests/efm-setup-unit.sh` (44 tests), added to `make test` and CI.
+  - **Removed: the `epas-base-build.sh` wrapper and `conf/sudoers.d/deployer.sample`.** The wrapper made root run the DBA's part through
+    `sudo -u`, which the sysadmins do not want; the sample whitelist was unsafe (its own header said so). Use `epas-base-build-root.sh`
+    (sysadmin, root) and then `epas-base-build-db.sh` (DBA, as `enterprisedb`).
+  - New `docs/who-runs-what.md`: which steps the sysadmin (root) runs and which the DBA runs, per task. The two TDE/Thales scripts remain the documented exception until the POC settles.
+  - `conf/sudoers.d/epas-automation`: EPAS 18 added (start, stop, restart, reload).
 
 - **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the
   latest backup (or `--pick random`), checks free space, tablespaces, the TDE passphrase file and

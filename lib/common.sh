@@ -195,13 +195,30 @@ confirm_destructive() {
     log_audit "Destructive action on ${host} confirmed by $(whoami): $*"
 }
 
+# run_as_db_user CMD... — run a command as SYSTEM_USER (the database OS user).
+# Already that user (the normal DBA run): the command runs directly, with no sudo - the DBA has
+# no sudo rule for "sudo -u enterprisedb", and needs none. Root (or another user): through 'sudo -u'.
+run_as_db_user() {
+    if [ "$(id -un)" = "${SYSTEM_USER:?SYSTEM_USER is not set}" ]; then
+        "$@"
+    else
+        sudo -u "$SYSTEM_USER" "$@"
+    fi
+}
+
+# epas_cmd NAME — full path of an EPAS program (psql, edb_sqlpatch, pg_isready ...); NAME alone (found on PATH) if not there
+epas_cmd() {
+    local bin="${SRC_BINARY_DIR:-/usr/edb/as${EPAS_VERSION}}/bin/$1"
+    [ -x "$bin" ] || bin="$1"
+    printf '%s\n' "$bin"
+}
+
 # wait_for_epas [tries] [seconds] — pg_isready on PRIMARY_PORT as SYSTEM_USER; returns 1 on timeout
 wait_for_epas() {
     local tries="${1:-12}" secs="${2:-5}" i bin
-    bin="${SRC_BINARY_DIR:-/usr/edb/as${EPAS_VERSION}}/bin/pg_isready"
-    [ -x "$bin" ] || bin="pg_isready"
+    bin="$(epas_cmd pg_isready)"
     for ((i = 1; i <= tries; i++)); do
-        if sudo -u "$SYSTEM_USER" "$bin" -q -p "$PRIMARY_PORT"; then
+        if run_as_db_user "$bin" -q -p "$PRIMARY_PORT"; then
             log_info "EPAS is accepting connections on port ${PRIMARY_PORT}."
             return 0
         fi
@@ -209,6 +226,32 @@ wait_for_epas() {
         sleep "$secs"
     done
     return 1
+}
+
+# epas_pkg_version — installed version-release of the EPAS server package ('' if rpm cannot tell)
+epas_pkg_version() {
+    local v
+    v="$(rpm -q --qf '%{VERSION}-%{RELEASE}' "edb-as${EPAS_VERSION}-server" 2>/dev/null)" || return 0
+    printf '%s\n' "$v"
+}
+
+# patch_state_file — where node-maintenance-stop.sh notes the package version it saw ('' = no log directory)
+patch_state_file() {
+    local d
+    d="$(log_dir)"
+    [ -z "$d" ] || printf '%s\n' "${d}/patching/$(hostname -s)_${EPAS_SERVICE}.version"
+}
+
+# vip_status — say where the EFM virtual IP is, if this cluster uses one. Information only: a
+# standby legitimately does not have it, and many clusters use a connection string, not a VIP.
+vip_status() {
+    if [ -z "${VIP_ADDRESS:-}" ]; then
+        log_info "VIP_ADDRESS is not set: no virtual IP check (clients connect by connection string)"
+    elif ip addr show "${VIP_INTERFACE:-eth0}" 2>/dev/null | grep -qF "$VIP_ADDRESS"; then
+        log_info "VIP ${VIP_ADDRESS} is on this node (${VIP_INTERFACE:-eth0})"
+    else
+        log_info "VIP ${VIP_ADDRESS} is not on this node (normal for a standby)"
+    fi
 }
 
 # efm_bin — path to the efm command for EFM_VERSION (falls back to 'efm' on PATH)

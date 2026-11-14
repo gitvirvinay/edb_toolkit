@@ -218,7 +218,7 @@ psql service=as17 -c "select version();"
 /opt/dba/edb_toolkit/tools/epastab.sh check     # expect: RESULT registry matches this host
 ```
 
-The old one-shot command `sudo epas-base-build.sh --tag DEV` still runs A then B for you, but it is a wrapper that will be removed. Use the two scripts.
+The old one-shot command `sudo epas-base-build.sh --tag DEV` was removed: it made root run the DBA's part through `sudo -u`. Run the two scripts separately: part A as root (the sysadmin), part B as `enterprisedb` (the DBA).
 
 > **Pro tips**
 >

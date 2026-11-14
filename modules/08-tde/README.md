@@ -13,6 +13,9 @@ secrets manager: `export THALES_PASS=...` before running.
 
 The wrapped data key lives in **`<DATA_TOP>/pg_encryption/key.bin`** (EDB docs: "Data encryption key").
 
+> **Root and DBA split: these scripts are the one exception.** They still run as root and use `sudo -u <SYSTEM_USER>` inside
+> (see `docs/who-runs-what.md`). They will be reworked after the Thales POC settles.
+
 ## Prerequisites (both)
 - EPAS installed (`SRC_BINARY_DIR/bin`), EDB repository configured (`dnf repolist | grep enterprisedb`)
 - Thales CipherTrust Manager reachable on KMIP port 5696

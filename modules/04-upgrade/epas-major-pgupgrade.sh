@@ -12,18 +12,18 @@ source "${SCRIPT_DIR}/../../lib/epas-tde.sh"
 MIGRATE_SSL="${SCRIPT_DIR}/../02-ssl/epas-migrate-ssl-conf.sh"
 
 USE_LINK=false
-REQUIRE_ROOT=false
 
 usage() {
     cat <<USAGE
-Usage: $0 [--env conf/site.env] [--link] [--root] [--yes]
+Usage: $0 [--env conf/site.env] [--link] [--yes]
 Upgrades OLD_DATA_TOP (EPAS OLD_EPAS_VERSION) into the already-initialised DATA_TOP (EPAS EPAS_VERSION):
 pg_upgrade --check, stop both services, pg_upgrade, carry pg_hba.conf / pg_ident.conf / SSL settings
 (pg_upgrade copies no config files), start the new service, check SSL, rebuild statistics.
   --link : pg_upgrade hard links (fast, no extra disk; the old cluster is unusable once the new one starts).
            Refused when either cluster uses TDE.
 TDE clusters are upgraded with --copy-by-block automatically (data re-encrypted with the new cluster's key).
-  --root : run as root (pg_upgrade runs via 'sudo -u SYSTEM_USER'); otherwise run as SYSTEM_USER.
+Run as SYSTEM_USER (the database OS user), never as root. The new EPAS packages must already be installed
+(the sysadmin runs dnf); the only sudo used is the service whitelist in conf/sudoers.d/epas-automation.
   --yes  : skip the confirmation questions (including "verified backup taken?").
 Config is required (default conf/site.env): OLD_EPAS_VERSION, OLD_DATA_TOP, OLD_SRC_BINARY_DIR,
 OLD_SERVICE_NAME, EPAS_VERSION, DATA_TOP, SRC_BINARY_DIR, SERVICE_NAME, SYSTEM_USER, PRIMARY_PORT,
@@ -36,7 +36,7 @@ parse_common_args "$@"; set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --link)    USE_LINK=true; shift ;;
-        --root)    REQUIRE_ROOT=true; shift ;;
+        --root)    die "--root was removed: run this script as '${SYSTEM_USER:-the database OS user}', not root (the sysadmin only installs the packages)." ;;
         -h|--help) usage ;;
         *)         die "Unknown argument: $1 (see --help)" ;;
     esac
@@ -69,14 +69,9 @@ fi
 
 # --- USER CONTEXT CHECK ---
 CURRENT_USER=$(whoami)
-if [ "$REQUIRE_ROOT" = true ]; then
-    require_root
-    EXEC_CMD="sudo -u ${EXPECTED_USER}"
-else
-    [ "$CURRENT_USER" != "root" ] || die "Do not run as root without --root. Execute as '${EXPECTED_USER}' or pass --root."
-    [ "$CURRENT_USER" == "$EXPECTED_USER" ] || die "Script must be executed as '${EXPECTED_USER}' (currently: ${CURRENT_USER})."
-    EXEC_CMD=""
-fi
+[ "$CURRENT_USER" != "root" ] || die "Do not run as root. Execute as '${EXPECTED_USER}'."
+[ "$CURRENT_USER" == "$EXPECTED_USER" ] || die "Script must be executed as '${EXPECTED_USER}' (currently: ${CURRENT_USER})."
+EXEC_CMD=""
 
 # --- EFM GUARD: this script stops the old and new EPAS services. Under a running EFM agent that looks
 #     like a database failure and can cause a failover in the middle of the upgrade. Stop the EFM
@@ -178,8 +173,6 @@ else
     TMP_PASS=$(mktemp)
     chmod 600 "$TMP_PASS"
     printf '%s' "$PGPASSWORD_TDE" > "$TMP_PASS"
-    # pg_upgrade runs as EXPECTED_USER (via sudo in --root mode): it must be able to read the file
-    [ "$REQUIRE_ROOT" = true ] && chown "$EXPECTED_USER" "$TMP_PASS"
     export PGDATAKEYWRAPCMD="openssl enc -e -aes-128-cbc -pbkdf2 -pass file:${TMP_PASS} -out %p"
     export PGDATAKEYUNWRAPCMD="openssl enc -d -aes-128-cbc -pbkdf2 -pass file:${TMP_PASS} -in %p"
     cleanup() { [ -f "${TMP_PASS:-}" ] && { shred -u "$TMP_PASS" 2>/dev/null || rm -f "$TMP_PASS"; }; }
@@ -204,7 +197,7 @@ if [[ "$OLD_TDE" == true || "$NEW_TDE" == true ]]; then
     log_info "TDE detected (old=${OLD_TDE}, new=${NEW_TDE}): using --copy-by-block (decrypt + re-encrypt; slower than a plain copy)."
 fi
 
-systemctl_cmd() { if [ "$REQUIRE_ROOT" = true ]; then systemctl "$@"; else sudo systemctl "$@"; fi; }
+systemctl_cmd() { sudo systemctl "$@"; }   # allowed by conf/sudoers.d/epas-automation
 
 # --- PREFLIGHT RUN (CHECK MODE) ---
 log_info "Executing structural compatibility preflight analysis..."

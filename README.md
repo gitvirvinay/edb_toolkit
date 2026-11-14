@@ -8,7 +8,7 @@ Production automation for **EDB Postgres Advanced Server (EPAS)** and **EDB Fail
 conf/                 shared configuration (one place for versions, paths, hosts)
   site.env.example      → copy to conf/site.env   (git-ignored) — used by every module
   tde.env.example       → copy to conf/tde.env    (git-ignored) — loads site.env + Thales/KMIP
-  sudoers.d/            sudoers rules: automation, deployer, EPAS 14→17 upgrade
+  sudoers.d/            sudoers rules: automation (the one to install: service control for the DBA), EPAS 14→17 upgrade (old sample)
 lib/common.sh         shared start-up: --env handling, config loading, settings summary (sources lib/logger.sh)
 lib/logger.sh         central logger: screen + one file per run in <LOG_MOUNT>/toolkit (syslog optional)
 modules/
@@ -21,7 +21,7 @@ modules/
   07-tuning/          Kernel HugePages/memory tuning, shared_buffers planning, verification, sql/ monitoring
   08-tde/             TDE with Thales CipherTrust (KMIP): new setup, openssl-passphrase → Thales migration
 tools/                get-edb-inventory.sh — what EDB software/config is on this host
-docs/                 package install recommendation, multi-day tuning audit procedure
+docs/                 who-runs-what (sysadmin vs DBA), package install recommendation, multi-day tuning audit procedure
 tests/lint.sh         bash -n + CRLF check (+ shellcheck); run by CI (.github/workflows/lint.yml)
 ```
 

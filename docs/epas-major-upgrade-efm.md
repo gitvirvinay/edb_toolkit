@@ -10,7 +10,8 @@ back loses everything written since.
 
 ## Before the window
 1. Fresh backup of the old cluster, verified (the script asks you to confirm).
-2. New cluster already built and initialised on the primary (`01-provision`), same TDE passphrase setup.
+2. **The sysadmin has installed the EPAS 17 packages (dnf)** on every node, ahead of the window. Nobody needs root during the window: the DBA runs every step below as `enterprisedb`, with the service whitelist in `conf/sudoers.d/epas-automation`.
+2b. New cluster already built and initialised on the primary (`01-provision`), same TDE passphrase setup.
 3. A copy of the EFM properties file made ready for EPAS 17 (or plan to use step 6 below).
 4. Rehearsed once on a copy, with `docs/epas-upgrade-rehearsal.md` filled in (times and checks).
 5. The TDE passphrase file is outside the data directory (`/etc/edb/tde`), is the same for the old and new cluster, and has a copy outside the servers. The upgrade script checks the first two before stopping anything.
@@ -18,12 +19,12 @@ back loses everything written since.
 ## In the window
 | # | Step | Where | How |
 |---|------|-------|-----|
-| 1 | Stop the EFM agents (standby first, then primary) | both nodes | `systemctl stop <efm unit>`; check with `efm_agents_running` (the upgrade script refuses to run if one is active) |
+| 1 | Stop the EFM agents (standby first, then primary) | both nodes | `sudo systemctl stop <efm unit>` (whitelisted); check with `efm_agents_running` (the upgrade script refuses to run if one is active) |
 | 2 | Stop the old standby's EPAS and **leave its data alone** | standby | It is your way back. Do not rebuild it yet. |
 | 3 | Upgrade | primary | `epas-major-pgupgrade.sh` (check, stop old and new, `pg_upgrade --copy-by-block` for TDE, carry pg_hba/SSL, start new, rebuild statistics) |
 | 4 | Validate with the application | primary | Application up, tests pass. If it fails here, go back (see the point of no return above). |
-| 5 | Put the EPAS 17 properties file in place | primary | `modules/05-efm/efm-reconfigure-after-upgrade.sh` (backs the file up, sets `db.bin`, `db.data.dir`, `db.port`, `db.service.name`, `db.config.dir`) or your prepared file |
-| 6 | Start EFM on the primary only | primary | `systemctl start <efm unit>`; `efm-cluster-status.sh` shows one node. No VIP, so nothing else to move. |
+| 5 | Put the EPAS 17 properties file in place | primary | DBA: `modules/05-efm/efm-reconfigure-after-upgrade.sh` builds the corrected file and prints two commands. **Sysadmin** runs them as root (backup + `install`). DBA runs the script again: "already up to date". Or install your own prepared file the same way. Changes `db.bin`, `db.data.dir`, `db.port`, `db.service.name`, `db.config.dir`. |
+| 6 | Start EFM on the primary only | primary | `sudo systemctl start <efm unit>` (whitelisted); `efm-cluster-status.sh` shows one node. No VIP, so nothing else to move. |
 | 7 | Rebuild the standby on EPAS 17 | standby | New binaries and the site config for 17 on this host, passphrase file already installed. `modules/01-provision/epas-rebuild-standby.sh`: checks the version, the free space (old data is kept beside the new copy) and the TDE passphrase file, then `pg_basebackup -R --checkpoint=fast`, starts it. Check replication on the primary |
 | 8 | Add the standby to EFM | primary, then standby | `efm allow-node <cluster> <standby ip>` on the primary; EPAS 17 properties on the standby (step 5 script); start the agent; `efm-cluster-status.sh` shows two nodes UP |
 | 9 | Start a new WAL archive and take the first EPAS 17 backup | primary | `modules/04-upgrade/epas-post-upgrade-backup.sh` does steps 9 and 10: checks archiving, moves the old version's backups into `pre-upgrade-epas<old>-<time>/`, proves archiving with a WAL switch, takes the backup. The EPAS 15 backups cannot be restored on 17 |

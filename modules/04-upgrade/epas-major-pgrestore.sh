@@ -8,7 +8,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../lib/common.sh"
 
-REQUIRE_ROOT=false
 JOBS=""
 DUMP_DIR=""
 KEEP_DUMPS=false
@@ -17,12 +16,12 @@ SELECTED_DBS=()
 
 usage() {
     cat <<USAGE
-Usage: $0 [--env conf/site.env] [--root] [--jobs N] [--db NAME ...] [--dump-dir DIR] [--keep-dumps]
+Usage: $0 [--env conf/site.env] [--jobs N] [--db NAME ...] [--dump-dir DIR] [--keep-dumps]
           [--allow-unencrypted-target] [--yes]
 Copies roles/tablespaces and every connectable database from the OLD cluster (EPAS OLD_EPAS_VERSION, port OLD_PORT)
 into the already-built NEW cluster (EPAS EPAS_VERSION, port PRIMARY_PORT), then rebuilds statistics and compares
 object counts. Uses the NEW version's pg_dump/pg_restore (directory format, parallel). The old cluster is not changed.
-  --root        run as root (tools run via 'sudo -u SYSTEM_USER'); otherwise run as SYSTEM_USER.
+  Run as SYSTEM_USER (the database OS user), never as root. The sysadmin installs the EPAS packages beforehand.
   --jobs N      parallel dump/restore jobs per database (default: CPU count, max 8).
   --db NAME     only migrate this database (repeatable). Default: all databases that allow connections.
   --dump-dir D  where dumps and logs go (default: <parent of DATA_TOP>/pgrestore_<timestamp>; never /tmp).
@@ -39,7 +38,7 @@ USAGE
 parse_common_args "$@"; set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --root)       REQUIRE_ROOT=true; shift ;;
+        --root)       die "--root was removed: run this script as '${SYSTEM_USER:-the database OS user}', not root (the sysadmin only installs the packages)." ;;
         --jobs)       [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die "--jobs needs a positive number"; JOBS="$2"; shift 2 ;;
         --db)         [ -n "${2:-}" ] || die "--db needs a database name"; SELECTED_DBS+=("$2"); shift 2 ;;
         --dump-dir)   [ -n "${2:-}" ] || die "--dump-dir needs a path"; DUMP_DIR="$2"; shift 2 ;;
@@ -78,19 +77,14 @@ case "$DUMP_DIR/" in
 esac
 
 # --- USER CONTEXT (same rules as epas-major-pgupgrade.sh) ---
-if [ "$REQUIRE_ROOT" = true ]; then
-    require_root
-    EXEC_CMD=(sudo -u "$SYSTEM_USER")
-else
-    [ "$(whoami)" != "root" ] || die "Do not run as root without --root. Execute as '${SYSTEM_USER}' or pass --root."
-    [ "$(whoami)" == "$SYSTEM_USER" ] || die "Script must be executed as '${SYSTEM_USER}' (currently: $(whoami))."
-    EXEC_CMD=()
-fi
+[ "$(whoami)" != "root" ] || die "Do not run as root. Execute as '${SYSTEM_USER}'."
+[ "$(whoami)" == "$SYSTEM_USER" ] || die "Script must be executed as '${SYSTEM_USER}' (currently: $(whoami))."
+EXEC_CMD=()
 run()  { "${EXEC_CMD[@]+"${EXEC_CMD[@]}"}" "$@"; }
 # q PORT DB SQL — one value/row per line, stops on error
 q()    { run "$NEW_BIN/psql" -X -q -A -t -v ON_ERROR_STOP=1 -p "$1" -d "$2" -c "$3"; }
 ready() { run "$NEW_BIN/pg_isready" -q -p "$1"; }
-systemctl_cmd() { if [ "$REQUIRE_ROOT" = true ]; then systemctl "$@"; else sudo systemctl "$@"; fi; }
+systemctl_cmd() { sudo systemctl "$@"; }   # allowed by conf/sudoers.d/epas-automation
 
 # ensure_running PORT SERVICE LABEL
 ensure_running() {
@@ -207,7 +201,6 @@ confirm_or_exit "dump ${#DBS[@]} database(s) from port ${OLD_PORT} (EPAS ${OLD_E
 umask 077   # dumps, logs and globals.sql (role password hashes) readable only by their owner
 [ ! -e "$DUMP_DIR" ] || die "Dump directory already exists: ${DUMP_DIR} (choose another with --dump-dir)"
 mkdir -p -m 700 "$DUMP_DIR"
-[ "$REQUIRE_ROOT" = true ] && chown "$SYSTEM_USER" "$DUMP_DIR"
 SUCCESS=false
 on_exit() { [ "$SUCCESS" = true ] || log_error "Run did not complete. Dumps and logs kept in ${DUMP_DIR} - the old cluster is unchanged."; }
 trap on_exit EXIT
