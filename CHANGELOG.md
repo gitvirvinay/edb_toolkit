@@ -30,6 +30,7 @@ What changed in edb_toolkit, newest first. Updated together with every change.
   - **Removed: the `epas-base-build.sh` wrapper and `conf/sudoers.d/deployer.sample`.** The wrapper made root run the DBA's part through
     `sudo -u`, which the sysadmins do not want; the sample whitelist was unsafe (its own header said so). Use `epas-base-build-root.sh`
     (sysadmin, root) and then `epas-base-build-db.sh` (DBA, as `enterprisedb`).
+  - New `docs/who-runs-what.md`: which steps the sysadmin (root) runs and which the DBA runs, per task. The two TDE/Thales scripts remain the documented exception until the POC settles.
   - `conf/sudoers.d/epas-automation`: EPAS 18 added (start, stop, restart, reload).
 
 - **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the
