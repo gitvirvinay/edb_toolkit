@@ -2,7 +2,22 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
-## Unreleased
+## v3.0.0 - 2026-11-13
+
+**Breaking: root and DBA are split.** The sysadmin does the root work (dnf, files in `/etc`, mounts, kernel, sudoers); the DBA runs everything
+else as `enterprisedb` through the sudo whitelist, with no `su` and no `sudo -u` inside any script (the TDE/Thales scripts are the one
+exception until the POC settles). See `docs/who-runs-what.md`. What to change in your runbooks:
+
+| Before | Now |
+|---|---|
+| `sudo epas-minor-update.sh` / `sudo epas-minor-update-efm.sh` | DBA `node-maintenance-stop.sh` -> sysadmin `dnf upgrade -y 'edb-as<ver>*'` -> DBA `node-maintenance-start.sh --patched` |
+| `epas-major-pgupgrade.sh --root`, `epas-major-pgrestore.sh --root` | run as `enterprisedb`; the sysadmin installs the new packages first |
+| `sudo efm-setup.sh [--no-install] [--start]` | DBA `efm-setup.sh` prepares the files; sysadmin runs the printed `dnf` and `install` commands; DBA starts the agent with `sudo systemctl` |
+| `sudo efm-reconfigure-after-upgrade.sh` | DBA `efm-reconfigure-after-upgrade.sh` prepares the file; sysadmin runs the printed `install`; DBA runs it again to confirm |
+| `sudo epas-base-build.sh` (wrapper) | `epas-base-build-root.sh` (sysadmin), then `epas-base-build-db.sh` (DBA) |
+| sudoers: EPAS 15-17 | `conf/sudoers.d/epas-automation` now also lists EPAS 18; the sysadmin re-installs it once per server |
+
+Also in this release (since v2.0.0): the backup module, the restore test, the EPAS 17 upgrade (Track A) and the EFM guard in the upgrade script.
 
 - **Breaking: root and DBA split in patching. `epas-minor-update.sh` and `epas-minor-update-efm.sh` are removed.**
   They ran as root and called `dnf` in the middle of a run. The sysadmin now runs `dnf`; the DBA runs only
