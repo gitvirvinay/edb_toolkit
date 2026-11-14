@@ -27,6 +27,9 @@ What changed in edb_toolkit, newest first. Updated together with every change.
     files and prints the root commands for the sysadmin (`dnf install`, backup, `install -o efm -g efm -m 600 ...`, `daemon-reload`).
     Running it again says "already installed". The DBA starts the agent with `sudo systemctl enable/start <unit>` (whitelist).
     New `tests/efm-setup-unit.sh` (44 tests), added to `make test` and CI.
+  - **Removed: the `epas-base-build.sh` wrapper and `conf/sudoers.d/deployer.sample`.** The wrapper made root run the DBA's part through
+    `sudo -u`, which the sysadmins do not want; the sample whitelist was unsafe (its own header said so). Use `epas-base-build-root.sh`
+    (sysadmin, root) and then `epas-base-build-db.sh` (DBA, as `enterprisedb`).
   - `conf/sudoers.d/epas-automation`: EPAS 18 added (start, stop, restart, reload).
 
 - **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the
