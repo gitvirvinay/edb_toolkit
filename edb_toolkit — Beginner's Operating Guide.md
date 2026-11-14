@@ -34,7 +34,7 @@ Nothing has been run on a real EPAS server yet (that is the next roadmap item), 
 
 ## 1. Get the toolkit onto a server
 
-Pick a tag (e.g. `v1.3.1`), get that exact version onto the server by Git or by bundle, then run `sudo tools/install.sh` from it. Both roads end in the same `/opt/dba/edb_toolkit`.
+Pick a tag (e.g. `v1.3.1`), get that exact version onto the server by Git, by bundle or by paste kit, then run `sudo tools/install.sh` from it. All three roads end in the same `/opt/dba/edb_toolkit`.
 
 ### Road A — the server can reach Git
 
@@ -69,6 +69,32 @@ sha256sum -c edb_toolkit-v1.3.1.tar.gz.sha256
 tar xzf edb_toolkit-v1.3.1.tar.gz
 sudo edb_toolkit/tools/install.sh
 ```
+
+### Road C — nothing can be copied except text (paste kit)
+
+When there is no Git, no `scp` and no file transfer, only copy and paste, build a paste kit on your laptop. It has the same content as the bundle, cut into plain-text parts of about 38 KB each, and every part checks itself.
+
+```bash
+cd edb_toolkit && git checkout v3.1.0
+make paste-kit
+# Paste kit: …/edb_toolkit/dist/paste-kit-v3.1.0
+# Parts:     8 (+ finish.sh, README.txt), up to 500 lines each
+```
+
+On the server, as your own admin account, in a bash shell: open `part-01.sh` on the laptop, copy all of it, paste it into the terminal and press Enter. It ends with `part 1 of 8: OK`. Do the same for every part (any order), then paste `finish.sh` last.
+
+```text
+part 1 of 8: OK
+...
+part 8 of 8: OK
+edb_toolkit v3.1.0 (2026-11-14) is in /home/you/edb_kit/edb_toolkit
+Next: cd /home/you/edb_kit/edb_toolkit && sudo tools/install.sh
+```
+
+- A part that says `DAMAGED` was changed on the way (a cut-off paste, CRLF line endings): paste the same part again. Pasting a part twice is harmless.
+- `finish.sh` checks that every part is there, then the whole kit, and refuses to overwrite an existing `~/edb_kit/edb_toolkit`.
+- If the terminal chokes on a paste, save the part with an editor (`vi part-01.sh`) and run `bash part-01.sh`.
+- Start clean after a failed attempt with `rm -rf ~/edb_kit`.
 
 ### What install.sh does and prints
 

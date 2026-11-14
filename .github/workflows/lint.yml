@@ -17,3 +17,4 @@ jobs:
       - run: bash tests/restore-test-unit.sh
       - run: bash tests/efm-reconfigure-unit.sh
       - run: bash tests/efm-setup-unit.sh
+      - run: bash tests/paste-kit-unit.sh

@@ -2,6 +2,20 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
+## v3.1.0 - 2026-11-13
+
+**New: paste kit for servers where only text can be copied.** `tools/make-paste-kit.sh` (or `make paste-kit`) builds
+`dist/paste-kit-<version>/` from the committed repo: the same content as the bundle, cut into plain-text parts of about 38 KB
+(`part-01.sh` ... `part-NN.sh`), plus `finish.sh` and `README.txt`. Paste each part into a terminal on the server; each one writes
+its slice and checks it with sha256 (`part 3 of 8: OK`, or `DAMAGED - paste this part again`). `finish.sh` checks that every part is
+present and that the whole archive is intact, then unpacks to `~/edb_kit/edb_toolkit`. It refuses to overwrite an existing copy.
+Parts are plain ASCII (no tabs, no CR, short lines), so terminals and editors do not change them.
+
+- `--lines N` changes the part size (default 500 base64 lines).
+- New test `tests/paste-kit-unit.sh` (26 checks: round trip equals the committed tree, damaged and CRLF pastes caught, missing or stray part caught), in `make test` and CI.
+- The Beginner's Guide has a new "Road C" for the paste kit.
+- Nothing changes for existing scripts or runbooks.
+
 ## v3.0.0 - 2026-11-13
 
 **Breaking: root and DBA are split.** The sysadmin does the root work (dnf, files in `/etc`, mounts, kernel, sudoers); the DBA runs everything
