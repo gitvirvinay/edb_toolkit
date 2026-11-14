@@ -98,7 +98,7 @@ Run `epas-ssl-setup.sh` as the database OS user, never as root. The bundle must 
 
 ```bash
 sudo install -o enterprisedb -m 0600 /tmp/epas_bundle.pem /tmp/epas_bundle.ent.pem   # only if needed
-sudo -iu enterprisedb /opt/dba/edb_toolkit/modules/02-ssl/epas-ssl-setup.sh -b /tmp/epas_bundle.ent.pem
+/opt/dba/edb_toolkit/modules/02-ssl/epas-ssl-setup.sh -b /tmp/epas_bundle.ent.pem     # as enterprisedb
 ```
 
 Why not root: every file it writes is owned by `enterprisedb`, in directories `enterprisedb` controls. Root writing there can be redirected by a symbolic link the database account planted, turning "DB account" into "root". A running cluster is **reloaded** (no downtime, no sudo). Only a stopped cluster or `--restart` needs a restart: through the sudoers rule (`sudo systemctl restart edb-as-17`), or `pg_ctl` for a cluster started with `pg_ctl`.
@@ -144,7 +144,7 @@ Clients using `sslmode=verify-full` check that the name they connected to is in 
 ### Check Database SSL Status
 Run the following query as the database administrative user:
 ```bash
-su - enterprisedb -c "psql -p 5444 -d postgres -c 'SHOW ssl;'"
+psql -p 5444 -d postgres -c 'SHOW ssl;'
 ```
 **Expected Output:**
 ```text

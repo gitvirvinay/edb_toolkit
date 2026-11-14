@@ -18,7 +18,7 @@ primary; a standby gets the catalog changes by replication.
 
 All scripts **require** a config: `--env <file>`, or `conf/site.env` in the repo (created with `make env`).
 Each run prints the settings it will use, then asks **"Proceed? (y/N)"** when run from a terminal
-(`--yes` skips the question; non-interactive runs such as Ansible/cron proceed without asking).
+(`--yes` skips the question; without a terminal they proceed anyway, but pass `--yes` in cron and Ansible so it is explicit).
 
 | Script | Run as / where | Purpose |
 |---|---|---|
@@ -29,6 +29,19 @@ The same two `node-maintenance-*` scripts are used at both sites, with or withou
 `SITE` and `HA_TOOL` in `conf/site.env` decide what they do.
 
 Settings used (`conf/site.env`): `EPAS_VERSION`, `EFM_VERSION`, `EFM_CLUSTER_NAME`, `SYSTEM_USER`, `PRIMARY_PORT`, `SRC_BINARY_DIR` (for `pg_isready`, `psql`, `edb_sqlpatch`), `VIP_INTERFACE`, `VIP_ADDRESS`, `HA_TOOL`, `SITE`. The `efm` command is taken from `/usr/edb/efm-<EFM_VERSION>/bin/efm` (or `EFM_BIN`).
+
+## Unattended use and exit codes
+
+Both scripts call `sudo -n`: a missing sudoers entry fails at once instead of waiting for a password. Pass `--yes`.
+
+| Exit code | Meaning | What a playbook or person does |
+|---|---|---|
+| `0` | Done. For `node-maintenance-start.sh`: EPAS is up and EFM reports the cluster (or `HA_TOOL="none"`). | Go on to the next step or node |
+| `1` | Refused or failed. The message says what was and was not stopped or started. | Stop and fix; the script is safe to run again |
+| `2` | Only `node-maintenance-start.sh`: EPAS is running but EFM did not report the cluster in time. | **Stop. Do not touch the next node** until a person has looked: `efm cluster-status <cluster>` |
+
+`EFM_WAIT_TRIES` and `EFM_WAIT_SECS` (default 12 and 5, so 60 seconds) set how long the start script waits for EFM.
+Run `node-maintenance-stop.sh` a second time on an already stopped node (a retry after the sysadmin's `dnf`) and it keeps the first note of the package version.
 
 ## Clusters without EFM (`HA_TOOL="none"`)
 

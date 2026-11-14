@@ -1,4 +1,9 @@
-# edb_toolkit v2 — design
+# edb_toolkit v2 — design (historical)
+
+> **This is the plan as agreed on 2026-11-09, kept to explain why the toolkit is shaped as it is. It is not a description of what exists.**
+> Several choices changed afterwards: backups use `pg_basebackup` with WAL archiving (not pgBackRest) and have a restore test; the root/DBA split
+> prints commands for the sysadmin instead of a `--plan` mode; versions are `v3.x`, not `v1.4.0`; the environment policy file and most `--check`
+> modes are not built. For what exists, read the README and `CHANGELOG.md`.
 
 Version: 2026-11-09 · Status: agreed direction, built step by step (evolve, not rewrite)
 
@@ -73,7 +78,7 @@ The tested code (02-ssl, `lib/`, unit tests, CI) is kept and moved, not rewritte
 - One TDE pass file per cluster (fixes the single unwrap command in 04-upgrade).
 - Tighter sudoers for pgbackrest: specific commands, not any arguments as root.
 - `epastab.sh` on the PATH; `tools/pg_bashrc.txt` renamed and linted.
-- Old `generate-env.sh` references removed (template and 01-provision README done; main README left).
+- Old `generate-env.sh` references removed (done everywhere, 2026-11-14).
 - Plaintext TDE passphrase in old clusters' `postgresql.conf`: `14-tde --check` finds it, a migration fixes it.
 
 ## Build order
