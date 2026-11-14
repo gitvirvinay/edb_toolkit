@@ -14,6 +14,7 @@ test:        ## unit tests (no database or root needed)
 	@bash tests/common-unit.sh
 	@bash tests/backup-unit.sh
 	@bash tests/restore-test-unit.sh
+	@bash tests/efm-reconfigure-unit.sh
 env:         ## create conf/site.env and conf/tde.env from the templates (won't overwrite)
 	@cp -n conf/site.env.example conf/site.env && echo "created conf/site.env" || true
 	@cp -n conf/tde.env.example conf/tde.env && echo "created conf/tde.env" || true

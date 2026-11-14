@@ -18,6 +18,10 @@ What changed in edb_toolkit, newest first. Updated together with every change.
   - `lib/common.sh`: new `run_as_db_user` (runs directly when already the DB user, no `sudo -u`); `wait_for_epas` uses it; new `epas_cmd`.
   - **Breaking: `epas-major-pgupgrade.sh` and `epas-major-pgrestore.sh` no longer have `--root`.** They run as the database OS user only
     (they already did by default); the sysadmin installs the EPAS packages beforehand. `--root` now stops with a message saying so.
+  - **`efm-reconfigure-after-upgrade.sh` no longer runs as root and no longer edits `/etc`.** The DBA runs it: it reads the properties
+    file, builds the corrected copy in `<log directory>/efm/` (mode 600) and prints the two commands for the sysadmin (backup, then
+    `install -o <owner> -g <group> -m <mode>`). Running it again says "already up to date" once the sysadmin has done that.
+    New `tests/efm-reconfigure-unit.sh` (27 tests), added to `make test` and CI.
   - `conf/sudoers.d/epas-automation`: EPAS 18 added (start, stop, restart, reload).
 
 - **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the

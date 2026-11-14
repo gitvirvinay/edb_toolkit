@@ -6,7 +6,7 @@ Settings come from `conf/site.env` (see the EFM block in `conf/site.env.example`
 |---|---|
 | `efm-setup.sh --role primary\|standby\|witness [--cluster NAME] [--no-install] [--start]` | Install and configure one EFM agent. Run on every node. Asks each value with the config value as default; `--yes` uses the config as-is. Several clusters per node supported (unique ports are checked). |
 | `efm-cluster-status.sh` | Cluster status plus a check that at least 2 nodes are UP (read-only). |
-| `efm-reconfigure-after-upgrade.sh [--properties FILE]` | After a major upgrade (04-upgrade): points the agent at the new `SRC_BINARY_DIR/bin`, `DATA_TOP`, `PRIMARY_PORT`, `SERVICE_NAME`; backs up the file and shows the changes. |
+| `efm-reconfigure-after-upgrade.sh [--properties FILE] [--out FILE]` | After a major upgrade (04-upgrade). **Run as the DBA.** Builds a corrected copy of the properties file (new `SRC_BINARY_DIR/bin`, `DATA_TOP`, `PRIMARY_PORT`, `SERVICE_NAME`) in `<log directory>/efm/`, shows the changes and prints the two commands the **sysadmin** runs as root (backup, then `install` with the same owner/mode). Run it again afterwards: "already up to date" means the step is done. The real file is never edited by the DBA. |
 
 ## Setting up a cluster
 
