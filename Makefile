@@ -1,4 +1,4 @@
-.PHONY: help lint lint-strict test env inventory install bundle
+.PHONY: help lint lint-strict test env inventory install bundle paste-kit
 help:        ## show targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ —/'
 lint:        ## bash -n + CRLF check (+ shellcheck if installed)
@@ -16,6 +16,7 @@ test:        ## unit tests (no database or root needed)
 	@bash tests/restore-test-unit.sh
 	@bash tests/efm-reconfigure-unit.sh
 	@bash tests/efm-setup-unit.sh
+	@bash tests/paste-kit-unit.sh
 env:         ## create conf/site.env and conf/tde.env from the templates (won't overwrite)
 	@cp -n conf/site.env.example conf/site.env && echo "created conf/site.env" || true
 	@cp -n conf/tde.env.example conf/tde.env && echo "created conf/tde.env" || true
@@ -25,3 +26,5 @@ install:     ## install this copy into /opt/dba/edb_toolkit (root; PREFIX=... to
 	@bash tools/install.sh
 bundle:      ## dist/edb_toolkit-<version>.tar.gz for servers without Git access
 	@bash tools/make-bundle.sh
+paste-kit:   ## dist/paste-kit-<version>/ : the toolkit as plain text parts to paste (no file transfer possible)
+	@bash tools/make-paste-kit.sh
