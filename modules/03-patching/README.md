@@ -1,20 +1,34 @@
 # 03-patching — minor version patching
 
+**No script here runs as root and none calls `dnf`.** The sysadmin installs the packages; the DBA does
+everything else, using only the sudo whitelist `conf/sudoers.d/epas-automation` (start/stop of the
+EPAS and EFM services, `efm cluster-status`).
+
+## How a patch is done (one node at a time)
+
+| Step | Who | What |
+|---|---|---|
+| 1 | DBA | `node-maintenance-stop.sh`: stops and disables the local EFM agent (EFM clusters), stops EPAS, notes the installed package version |
+| 2 | **Sysadmin** | `dnf upgrade -y 'edb-as<EPAS_VERSION>*'` (e.g. `edb-as17*`; only that EPAS version's packages) |
+| 3 | DBA | `node-maintenance-start.sh --patched`: refuses to start anything if the package version did not change; starts EPAS; runs `edb_sqlpatch` on a primary (not on a standby); then enables and starts EFM and waits for the cluster |
+
+Without new packages (a plain reboot or OS patching) use `node-maintenance-start.sh` without `--patched`.
+EFM clusters: patch the standbys first, the primary last, one node at a time. `edb_sqlpatch` runs only on the
+primary; a standby gets the catalog changes by replication.
+
 All scripts **require** a config: `--env <file>`, or `conf/site.env` in the repo (created with `make env`).
 Each run prints the settings it will use, then asks **"Proceed? (y/N)"** when run from a terminal
 (`--yes` skips the question; non-interactive runs such as Ansible/cron proceed without asking).
 
 | Script | Run as / where | Purpose |
 |---|---|---|
-| `node-maintenance-stop.sh` | user with sudo, on the node | Take this node out of service before OS patching or a reboot: stop & disable EFM, list the IP addresses (`SITE="primary"` only), stop EPAS (it stays enabled) and confirm it is down |
-| `node-maintenance-start.sh` | user with sudo, on the node | Bring it back: start EPAS, wait for it on `PRIMARY_PORT`, then enable & start EFM and wait for it to report the cluster. **EFM is not started if EPAS does not come up within 60 s.** |
-| `epas-minor-update.sh [<version>]` | **root**, a node without EFM | Stop service, `dnf upgrade edb-as<version>-server*`, restart, run `edb_sqlpatch`. Version defaults to `EPAS_VERSION`. Refuses to run while an EFM agent is active on the host. |
-| `epas-minor-update-efm.sh` | **root**, each EFM node in turn | VIP check → stop the **local** EFM agent only → stop EPAS → `dnf upgrade edb-as<EPAS_VERSION>*` → start EPAS (60 s safety stop) → start EFM → cluster & VIP check |
+| `node-maintenance-stop.sh` | **DBA** (`enterprisedb`), on the node | Take this node out of service before OS patching or a reboot: stop & disable EFM, list the IP addresses (`SITE="primary"` only), stop EPAS (it stays enabled) and confirm it is down |
+| `node-maintenance-start.sh [--patched]` | **DBA** (`enterprisedb`), on the node | Bring it back: start EPAS, wait for it on `PRIMARY_PORT`, then enable & start EFM and wait for it to report the cluster. **EFM is not started if EPAS does not come up within 60 s.** |
 
-The same two `node-maintenance-*` scripts are used at both sites and with or without EFM;
+The same two `node-maintenance-*` scripts are used at both sites, with or without EFM, for a minor patch or for OS patching;
 `SITE` and `HA_TOOL` in `conf/site.env` decide what they do.
 
-Settings used (`conf/site.env`): `EPAS_VERSION`, `EFM_VERSION`, `EFM_CLUSTER_NAME`, `SYSTEM_USER`, `PRIMARY_PORT`, `SRC_BINARY_DIR` (for `pg_isready`), `VIP_INTERFACE`, `VIP_ADDRESS`, `HA_TOOL`, `SITE`. The `efm` command is taken from `/usr/edb/efm-<EFM_VERSION>/bin/efm` (or `EFM_BIN`).
+Settings used (`conf/site.env`): `EPAS_VERSION`, `EFM_VERSION`, `EFM_CLUSTER_NAME`, `SYSTEM_USER`, `PRIMARY_PORT`, `SRC_BINARY_DIR` (for `pg_isready`, `psql`, `edb_sqlpatch`), `VIP_INTERFACE`, `VIP_ADDRESS`, `HA_TOOL`, `SITE`. The `efm` command is taken from `/usr/edb/efm-<EFM_VERSION>/bin/efm` (or `EFM_BIN`).
 
 ## Clusters without EFM (`HA_TOOL="none"`)
 
@@ -24,8 +38,6 @@ Set `HA_TOOL="none"` in `conf/site.env` for a cluster that has no failover manag
 |---|---|
 | `node-maintenance-stop.sh` | Skips the EFM steps and stops EPAS. It first checks that no EFM agent is running on the host and stops if one is: stopping EPAS under a running agent can cause a failover. |
 | `node-maintenance-start.sh` | Starts EPAS, waits for it, skips the EFM steps. |
-| `epas-minor-update-efm.sh` | Stops at once and points to `epas-minor-update.sh`. |
-| `epas-minor-update.sh` | The script for these clusters. It never touches EFM, and refuses to run if an EFM agent is active on the host. |
 
 The default is `HA_TOOL="efm"`, so a config file without the setting behaves as before.
 
@@ -36,4 +48,11 @@ stopped or EPAS is still running afterwards. EPAS is never stopped if EFM could 
 and disabled first. A stop of a service that is already stopped is not an error, so the script
 can be run again.
 
-Typical order: on each DR node `node-maintenance-stop.sh` → patch → `node-maintenance-start.sh`, then the primary site the same way.
+Typical order: on each DR node `node-maintenance-stop.sh` → sysadmin patches → `node-maintenance-start.sh` (`--patched` after a package update), then the primary site the same way.
+
+## The package-version note
+
+`node-maintenance-stop.sh` writes the installed `edb-as<ver>-server` version to `<log directory>/patching/<host>_<service>.version`
+(for example `/pglog/toolkit/patching/`). `node-maintenance-start.sh --patched` compares it with what is installed now and refuses to start
+anything if it is the same, so a forgotten or failed `dnf` is caught before the database starts on old packages.
+Best effort: if the note cannot be written, the stop script warns and `--patched` will refuse later (run without it if you are sure).

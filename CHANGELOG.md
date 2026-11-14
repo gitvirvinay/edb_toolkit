@@ -4,6 +4,20 @@ What changed in edb_toolkit, newest first. Updated together with every change.
 
 ## Unreleased
 
+- **Breaking: root and DBA split in patching. `epas-minor-update.sh` and `epas-minor-update-efm.sh` are removed.**
+  They ran as root and called `dnf` in the middle of a run. The sysadmin now runs `dnf`; the DBA runs only
+  `node-maintenance-stop.sh` and `node-maintenance-start.sh --patched`, using the sudo whitelist
+  (`conf/sudoers.d/epas-automation`) and no root of their own. Steps: stop (DBA) -> `dnf upgrade -y 'edb-as<ver>*'` (sysadmin) -> start `--patched` (DBA).
+  | Removed | Use instead |
+  |---|---|
+  | `epas-minor-update.sh`, `epas-minor-update-efm.sh` | `node-maintenance-stop.sh`, sysadmin `dnf`, `node-maintenance-start.sh --patched` |
+  - `node-maintenance-stop.sh` notes the installed package version once EPAS is stopped.
+  - `node-maintenance-start.sh --patched` checks that the version changed (starts nothing if not), runs
+    `edb_sqlpatch` as the DBA on a primary only (not on a standby), and only then starts EFM. Without `--patched`, behaviour is unchanged.
+  - The VIP check is information only now (and silent when `VIP_ADDRESS` is empty); the old "continue despite missing VIP?" question is gone.
+  - `lib/common.sh`: new `run_as_db_user` (runs directly when already the DB user, no `sudo -u`); `wait_for_epas` uses it; new `epas_cmd`.
+  - `conf/sudoers.d/epas-automation`: EPAS 18 added (start, stop, restart, reload).
+
 - **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the
   latest backup (or `--pick random`), checks free space, tablespaces, the TDE passphrase file and
   `pg_verifybackup`, copies the backup, replays **all** archived WAL on a small temporary instance

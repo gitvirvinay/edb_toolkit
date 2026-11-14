@@ -189,31 +189,6 @@ for site in primary dr; do
     rm -f "$T/fail"
 done
 
-echo "== epas-minor-update.sh (for a node without EFM)"
-env_file 'HA_TOOL="none"'
-echo "edb-efm-5.3.service" > "$T/agents"
-out=$(run modules/03-patching/epas-minor-update.sh); rc=$?
-eq "EFM agent running: refuses (exit code 1)"      "1" "$rc"
-has "EFM agent running: names the agent"           "An EFM agent is running on this host (edb-efm-5.3.service)" "$out"
-has "EFM agent running: points to the EFM script"  "epas-minor-update-efm.sh" "$out"
-eq "EFM agent running: nothing is stopped"         "" "$(calls)"
-env_file 'HA_TOOL="efm"'
-out=$(run modules/03-patching/epas-minor-update.sh); rc=$?
-eq "refused on an EFM node whatever HA_TOOL says"  "1" "$rc"
-eq "... and nothing is stopped"                    "" "$(calls)"
-rm -f "$T/agents"
-if [ "$(id -u)" -ne 0 ]; then
-    out=$(run modules/03-patching/epas-minor-update.sh)
-    has "no agent: the EFM check passes (next stop is the root check)" "Run as root" "$out"
-fi
-
-echo "== epas-minor-update-efm.sh"
-env_file 'HA_TOOL="none"'
-out=$(run modules/03-patching/epas-minor-update-efm.sh); rc=$?
-eq "HA_TOOL=none: refuses (exit code 1)"        "1" "$rc"
-has "HA_TOOL=none: points to the single-node script" "epas-minor-update.sh" "$out"
-eq "HA_TOOL=none: nothing is stopped"           "" "$(calls)"
-
 echo "== The old names are gone"
 for old in primary_site/patch-primary-shutdown.sh primary_site/patch-primary-startup.sh dr_site/patch-dr-shutdown.sh \
            dr_site/patch-dr-startup.sh epas-minor-patch-update.sh efm-rolling-minor-patch.sh; do
