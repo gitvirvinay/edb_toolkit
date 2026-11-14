@@ -94,6 +94,32 @@ has "no SAN: warns"                      "WARN  no subjectAltName" "$out"
 out=$(unset EPAS_SSL_SELF_NAMES; SSL_HOST_NAME=db01.example.com epas_ssl_self_names)
 eq  "SSL_HOST_NAME replaces detection"   "db01.example.com" "$out"
 
+echo "== Bundle order (epas_ssl_bundle_order)"
+mkcert leaf  leaf.example.com  "DNS:leaf.example.com"
+mkcert inter inter.example.com "DNS:inter.example.com"
+mkcert root  root.example.com  "DNS:root.example.com"
+printf 'pw' > "$TMP/pw"
+openssl pkcs8 -topk8 -in "$TMP/leaf.key" -v2 aes256 -passout file:"$TMP/pw" -out "$TMP/enc.key" 2>/dev/null
+has "test key is an ENCRYPTED PRIVATE KEY" "BEGIN ENCRYPTED PRIVATE KEY" "$(head -1 "$TMP/enc.key")"
+cat "$TMP/leaf.crt" "$TMP/inter.crt" "$TMP/root.crt" "$TMP/enc.key" > "$TMP/b-last.pem"
+cat "$TMP/enc.key" "$TMP/leaf.crt" "$TMP/inter.crt" "$TMP/root.crt" > "$TMP/b-first.pem"
+cat "$TMP/leaf.crt" "$TMP/enc.key" "$TMP/root.crt" > "$TMP/b-mid.pem"
+cat "$TMP/leaf.crt" "$TMP/root.crt" > "$TMP/b-nokey.pem"
+cat "$TMP/enc.key" > "$TMP/b-nocert.pem"
+out=$(epas_ssl_bundle_order "$TMP/b-last.pem");  rc=$?
+eq  "certificates then key: accepted"        "key-last:0" "$out:$rc"
+out=$(epas_ssl_bundle_order "$TMP/b-first.pem"); rc=$?
+eq  "key then certificates (older): accepted" "key-first:0" "$out:$rc"
+out=$(epas_ssl_bundle_order "$TMP/b-mid.pem");   rc=$?
+eq  "key between certificates: refused"      "1" "$rc"
+has "key between certificates: says why"     "between certificates" "$out"
+out=$(epas_ssl_bundle_order "$TMP/b-nokey.pem"); rc=$?
+eq  "no key: refused"                        "1" "$rc"
+out=$(epas_ssl_bundle_order "$TMP/b-nocert.pem"); rc=$?
+eq  "no certificate: refused"                "1" "$rc"
+out=$(epas_ssl_bundle_order "$TMP/leaf.crt");    rc=$?
+eq  "a lone certificate (no key): refused"   "1" "$rc"
+
 echo
 echo "Result: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))

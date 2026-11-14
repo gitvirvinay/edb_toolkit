@@ -74,7 +74,7 @@ openssl x509 -req -in "$WORKDIR/server.csr" \
   -extfile "$WORKDIR/server.ext"
 
 # 5. Bundle
-cat "$WORKDIR/server.key" "$WORKDIR/server.crt" "$WORKDIR/rootCA.crt" > "$OUTPUT_BUNDLE"
+cat "$WORKDIR/server.crt" "$WORKDIR/rootCA.crt" "$WORKDIR/server.key" > "$OUTPUT_BUNDLE"
 chmod 0600 "$OUTPUT_BUNDLE"
 
 echo "[SUCCESS] Bundle: $OUTPUT_BUNDLE"

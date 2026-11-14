@@ -14,6 +14,10 @@
 #       WARN   it is also valid for another node (PRIMARY_HOST, STANDBY_HOST, PRIMARY_FQDN, STANDBY_FQDN):
 #              a shared certificate - one private key on several servers
 #       WARN   wildcard name; no SAN at all
+#   epas_ssl_bundle_order BUNDLE  checks the PEM bundle layout: certificates leaf first / root last, the private key
+#                              at one end (after the last certificate = recommended, or before the first = older
+#                              layout), never between certificates. Prints "key-last" or "key-first"; returns 1 and
+#                              prints the reason when the layout is wrong (no key, no certificate, key in the middle)
 #   epas_ssl_days_left CERT    whole days until the certificate expires (negative = expired)
 #
 # Settings read from the environment / conf/site.env: SSL_HOST_NAME, SSL_SHARED_NAMES,
@@ -106,4 +110,18 @@ epas_ssl_check_names() {
         echo "WARN  no subjectAltName: clients fall back to the CN; put every name in the SAN"
     fi
     return $err
+}
+
+epas_ssl_bundle_order() {
+    local f=$1 ks ke fc lc
+    ks=$(grep -n -m1 -- '-BEGIN .*PRIVATE KEY-' "$f" | cut -d: -f1)
+    ke=$(grep -n -m1 -- '-END .*PRIVATE KEY-' "$f" | cut -d: -f1)
+    fc=$(grep -n -m1 -- '-BEGIN CERTIFICATE-' "$f" | cut -d: -f1)
+    lc=$(grep -n -- '-BEGIN CERTIFICATE-' "$f" | tail -n1 | cut -d: -f1)
+    [[ -n $ks && -n $ke ]] || { echo "no private key in the bundle"; return 1; }
+    [[ -n $fc ]]           || { echo "no certificate in the bundle"; return 1; }
+    if   (( ke < fc )); then echo "key-first"
+    elif (( ks > lc )); then echo "key-last"
+    else echo "the private key is between certificates; put it after the root CA (or before the server certificate)"; return 1
+    fi
 }

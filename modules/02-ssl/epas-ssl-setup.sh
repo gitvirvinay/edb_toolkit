@@ -21,11 +21,12 @@ umask 077
 #     creates it, or: sudo install -d -o enterprisedb -g enterprisedb -m 0700 /etc/edb/ssl
 #   - systemd-managed cluster: the sudoers file conf/sudoers.d/epas-automation
 #
-# PEM bundle order is ENFORCED:
-#         -----BEGIN ENCRYPTED PRIVATE KEY-----     (1) private key  FIRST
-#         -----BEGIN CERTIFICATE-----               (2) server/leaf  certificate
-#         -----BEGIN CERTIFICATE-----               (3..n-1) intermediate(s)
-#         -----BEGIN CERTIFICATE-----               (n) root CA      LAST
+# PEM bundle order is ENFORCED. The certificates must be leaf first, root last (the TLS chain order);
+# the private key goes at one end - after the root (recommended) or before the leaf (older bundles, still accepted):
+#         -----BEGIN CERTIFICATE-----               (1) server/leaf  certificate
+#         -----BEGIN CERTIFICATE-----               (2..n-1) intermediate(s), optional
+#         -----BEGIN CERTIFICATE-----               (n) root CA      LAST certificate
+#         -----BEGIN ENCRYPTED PRIVATE KEY-----     private key, after the root (or, older layout, before the leaf)
 #   Results:
 #       server_chained.crt = leaf + intermediate(s)   (all certs EXCEPT the last)
 #       root.crt           = last cert only           (root CA)
@@ -70,7 +71,7 @@ A running cluster is RELOADED (no downtime) and checked; a stopped one is starte
   --security-top DIR   install into DIR instead of SECURITY_TOP from the config
   --names-warn         certificate name problems only warn (moving an EXISTING certificate)
   --no-hba             leave pg_hba.conf alone (no SSL rule block)
-Bundle order: PRIVATE KEY -> server cert -> intermediates -> root CA (last).
+Bundle order: server cert -> intermediates -> root CA -> PRIVATE KEY (a key placed before the server cert is accepted too).
 One-time root steps: SECURITY_TOP owned by SYSTEM_USER mode 0700 (epas-base-build-root.sh), sudoers file.
 USAGE
     exit 0
@@ -162,7 +163,7 @@ if [[ -n "$PASS_FILE_ARG" ]]; then
     [[ -f "$PASS_FILE_ARG" && -r "$PASS_FILE_ARG" ]] || die "Passphrase file not readable: ${PASS_FILE_ARG}"
 fi
 
-echo "Expected bundle order: PRIVATE KEY -> server cert -> intermediates -> root CA (last)."
+echo "Expected bundle order: server cert -> intermediates -> root CA -> PRIVATE KEY (key first is accepted too)."
 show_config SERVICE_NAME SYSTEM_USER DATA_TOP SECURITY_TOP PRIMARY_PORT STANDBY_HOST SUBNET_CIDR SSL_SHARED_NAMES SSL_HOST_NAME INPUT_PEM_BUNDLE RESTART_HOW
 confirm_or_exit "install SSL from ${INPUT_PEM_BUNDLE} into ${SECURITY_TOP}, REPLACE ${DATA_TOP}/conf.d/ssl.conf and the SSL block of ${DATA_TOP}/pg_hba.conf (backed up first), then restart: ${RESTART_HOW}"
 
@@ -187,12 +188,11 @@ echo "Extracting private key from bundle..."
 awk '/-BEGIN .*PRIVATE KEY-/,/-END .*PRIVATE KEY-/' "$INPUT_PEM_BUNDLE" > "${WORK}/server.key"
 [[ -s "${WORK}/server.key" ]] || die "No private key found in bundle."
 
-# Order check: key block must appear BEFORE the first certificate block.
-KEY_START_LINE=$(grep -n -m1 -- '-BEGIN .*PRIVATE KEY-' "$INPUT_PEM_BUNDLE" | cut -d: -f1)
-FIRST_CERT_LINE=$(grep -n -m1 -- '-BEGIN CERTIFICATE-' "$INPUT_PEM_BUNDLE" | cut -d: -f1 || true)
-if [[ -n "$FIRST_CERT_LINE" && "$KEY_START_LINE" -gt "$FIRST_CERT_LINE" ]]; then
-    die "Bundle order violation - private key must come BEFORE the server certificate. Required order: key -> server cert -> intermediates -> root CA."
-fi
+# Order check: the key block sits at one end of the bundle - after the last certificate (recommended)
+# or before the first one (older layout) - never between certificates (lib/epas-ssl.sh).
+ORDER_OUT="$(epas_ssl_bundle_order "$INPUT_PEM_BUNDLE")" \
+    || die "Bundle order violation - ${ORDER_OUT}. Required order: server cert -> intermediates -> root CA -> private key."
+echo "Bundle layout: ${ORDER_OUT}"
 
 # Not a secret: a deliberately wrong passphrase. An unencrypted key opens with it.
 if openssl pkey -in "${WORK}/server.key" -noout -passin pass:_DUMMY_INVALID_ 2>/dev/null; then
