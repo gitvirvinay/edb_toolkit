@@ -54,6 +54,11 @@ printf '#!/bin/sh\necho "dnf $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/dnf"
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/pg_isready"
 printf '#!/bin/sh\necho "efm $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/efm"
 printf '#!/bin/sh\necho "ip $*" >> "%s/ipcalls"\nexit 0\n' "$T" > "$T/bin/ip"
+# rpm: prints the version in $T/pkgver (fails if the file is missing); psql: prints $T/inrec (default f);
+# edb_sqlpatch: recorded.
+printf '#!/bin/sh\n[ -f "%s/pkgver" ] || exit 1\ncat "%s/pkgver"\n' "$T" "$T" > "$T/bin/rpm"
+printf '#!/bin/sh\necho "psql $*" >> "%s/calls"\ncat "%s/inrec" 2>/dev/null || echo f\n' "$T" "$T" > "$T/bin/psql"
+printf '#!/bin/sh\necho "edb_sqlpatch $*" >> "%s/calls"\n[ -f "%s/sqlpatch_fail" ] && exit 1\nexit 0\n' "$T" "$T" > "$T/bin/edb_sqlpatch"
 chmod +x "$T"/bin/*
 
 # env_file LINES... - write a config file with the minimum the patching scripts need, plus LINES
@@ -73,7 +78,7 @@ env_file() {
 run() {
     : > "$T/calls"; : > "$T/ipcalls"
     env -u TOOLKIT_LOG_FILE -u HA_TOOL -u SITE -u BACKUP_TOOL -u APP_CODE \
-        PATH="$T/bin:$PATH" bash "$ROOT/$1" --env "$T/site.env" </dev/null 2>&1
+        PATH="$T/bin:$PATH" bash "$ROOT/$1" --env "$T/site.env" "${@:2}" </dev/null 2>&1
 }
 calls() { tr '\n' ';' < "$T/calls"; }
 # settings 'commands' - load lib/common.sh and the config file in a clean shell
@@ -237,6 +242,52 @@ fi
 grep -q 'confirm_destructive' tools/epas_full_uninstall.sh; eq "asks for the host name before deleting" 0 $?
 out=$(grep -nE 'rm -rf.*(DATA_TOP|WAL_TOP|ARCHIVE_TOP|BACKUP_TOP|LOG_TOP|BINARY_TOP|/pgdata|/pgwal|/pgarchive|/pgbackup|/pglog)' tools/epas_full_uninstall.sh)
 eq "never deletes the cluster mounts"                   "" "$out"
+
+echo "== Patching with the sysadmin's dnf in the middle (stop -> dnf -> start --patched)"
+rm -f "$T/agents" "$T/active" "$T/fail" "$T/inrec" "$T/sqlpatch_fail"; rm -rf "$T/logs/patching"
+env_file
+echo "17.5-1" > "$T/pkgver"
+out=$(run "$down"); rc=$?
+eq  "stop: exit code 0"                                  "0" "$rc"
+eq  "stop: notes the installed package version"          "17.5-1" "$(cat "$T"/logs/patching/*_edb-as-17.version 2>/dev/null)"
+has "stop: says so"                                      "Installed edb-as17-server is 17.5-1" "$out"
+has "stop: no VIP set, no VIP check"                     "VIP_ADDRESS is not set" "$out"
+out=$(run "$up" --patched); rc=$?
+eq  "start --patched, dnf has not run: exit code 1"      "1" "$rc"
+has "... says the packages did not change"               "is still 17.5-1" "$out"
+eq  "... and starts nothing"                             "" "$(calls)"
+echo "17.6-1" > "$T/pkgver"
+out=$(run "$up" --patched); rc=$?
+eq  "start --patched, packages changed: exit code 0"     "0" "$rc"
+has "... reports the change"                             "Packages changed: 17.5-1 -> 17.6-1" "$out"
+has "... EPAS started, edb_sqlpatch runs, THEN EFM starts" "systemctl start edb-as-17;psql" "$(calls)"
+has "... edb_sqlpatch before EFM is enabled"             "edb_sqlpatch -af;systemctl enable edb-efm-5.3" "$(calls)"
+echo t > "$T/inrec"
+out=$(run "$up" --patched); rc=$?
+eq  "start --patched on a standby: exit code 0"          "0" "$rc"
+has "... says edb_sqlpatch is for the primary only"      "standby: edb_sqlpatch runs on the primary only" "$out"
+hasnt "... and does not run edb_sqlpatch"                "edb_sqlpatch -af" "$(calls)"
+echo f > "$T/inrec"; : > "$T/sqlpatch_fail"
+out=$(run "$up" --patched); rc=$?
+eq  "edb_sqlpatch fails: exit code 1"                    "1" "$rc"
+has "... says EFM was NOT started"                       "EFM NOT started" "$out"
+hasnt "... and EFM is not started"                       "systemctl start edb-efm-5.3" "$(calls)"
+rm -f "$T/sqlpatch_fail"; rm -rf "$T/logs/patching"
+out=$(run "$up" --patched); rc=$?
+eq  "start --patched with no note from the stop: exit code 1" "1" "$rc"
+has "... explains where the note comes from"             "node-maintenance-stop.sh writes it" "$out"
+eq  "... and starts nothing"                             "" "$(calls)"
+out=$(run "$up"); rc=$?
+eq  "start without --patched (plain reboot): exit code 0" "0" "$rc"
+hasnt "... no edb_sqlpatch, no package check"            "edb_sqlpatch" "$(calls)"
+out=$(run "$up" --nonsense); rc=$?
+eq  "unknown option: exit code 1"                        "1" "$rc"
+env_file 'VIP_ADDRESS=10.1.2.3' 'VIP_INTERFACE=eth9'
+out=$(run "$down"); rc=$?
+has "stop with VIP_ADDRESS set: looks at that interface" "ip addr show eth9" "$(cat "$T/ipcalls")"
+has "... and reports it (information only, no question)" "VIP 10.1.2.3 is not on this node" "$out"
+eq  "... exit code 0"                                    "0" "$rc"
+rm -f "$T/pkgver" "$T/inrec"
 
 echo "== run_as_db_user (the DBA has no 'sudo -u enterprisedb' rule)"
 rdu() { bash -c "source '$ROOT/lib/common.sh'; sudo() { echo \"SUDO \$*\"; }; SYSTEM_USER='$1'; run_as_db_user echo hello" 2>&1; }

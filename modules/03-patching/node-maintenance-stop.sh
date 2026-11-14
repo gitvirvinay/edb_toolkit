@@ -10,6 +10,8 @@
 # EPAS stays ENABLED: it starts by itself after the reboot (it is not the HA brain). EFM is
 # disabled, so after a reboot no agent joins the cluster before the node has been checked -
 # node-maintenance-start.sh enables it again.
+# Once EPAS is stopped it notes the installed edb-as<ver>-server package version, so that
+# node-maintenance-start.sh --patched can check that the sysadmin's dnf really changed it.
 # Stops with an error, and writes no audit line, if EFM or EPAS cannot be stopped.
 # One node at a time. Bring the node back with node-maintenance-start.sh.
 # =============================================================================
@@ -45,6 +47,7 @@ else
 fi
 
 log_info "Taking ${NODE} out of service for maintenance"
+if [ "$HA_TOOL" = "efm" ] && [ "$SITE" = "primary" ]; then vip_status; fi
 if [ "$HA_TOOL" = "efm" ]; then
     # A failed stop is never ignored here: with the agent still running, stopping EPAS below
     # would look like a database failure to EFM and could cause a failover.
@@ -72,4 +75,13 @@ if systemctl is-active --quiet "$EPAS_SERVICE"; then
     die "${EPAS_SERVICE} is still running after the stop - this node is NOT ready for maintenance.${UNDO_HINT} Check: sudo systemctl status ${EPAS_SERVICE}"
 fi
 log_info "${EPAS_SERVICE} is stopped"
+
+# Note the package version now: the sysadmin's dnf comes next (best effort - it only helps the later check).
+PRE_VER="$(epas_pkg_version)"; STATE_FILE="$(patch_state_file)"
+if [ -n "$PRE_VER" ] && [ -n "$STATE_FILE" ] \
+   && { mkdir -p "$(dirname "$STATE_FILE")" && printf '%s\n' "$PRE_VER" > "$STATE_FILE"; } 2>/dev/null; then
+    log_info "Installed edb-as${EPAS_VERSION}-server is ${PRE_VER} (noted for node-maintenance-start.sh --patched)"
+else
+    log_warn "Could not note the installed package version: node-maintenance-start.sh --patched will not be able to check that dnf ran."
+fi
 log_audit "Node stopped for maintenance: ${NODE}, ${EPAS_SERVICE}, ${HA_NOTE}"
