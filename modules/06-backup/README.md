@@ -17,11 +17,12 @@ Each script checks it and does nothing (or refuses) when it is not the right one
 A backup that has never been restored is a hope, not a backup. This script restores one backup
 into a throw-away copy and proves that the base backup **and** the WAL archive work together.
 
-```
-sudo -iu enterprisedb modules/06-backup/restore-test.sh                 # the latest backup
-sudo -iu enterprisedb modules/06-backup/restore-test.sh --pick random   # any backup on disk: deeper, replays more WAL
-sudo -iu enterprisedb modules/06-backup/restore-test.sh --check-only    # the safety checks only, restores nothing
-sudo -iu enterprisedb modules/06-backup/restore-test.sh --remove-kept   # delete failed copies once you have looked at them
+```bash
+# as enterprisedb
+modules/06-backup/restore-test.sh                 # the latest backup
+modules/06-backup/restore-test.sh --pick random   # any backup on disk: deeper, replays more WAL
+modules/06-backup/restore-test.sh --check-only    # the safety checks only, restores nothing
+modules/06-backup/restore-test.sh --remove-kept   # delete failed copies once you have looked at them
 ```
 
 Runs as `SYSTEM_USER`, needs no root. Exit code `0` = pass, `1` = fail.

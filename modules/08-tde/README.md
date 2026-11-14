@@ -28,7 +28,7 @@ The wrapped data key lives in **`<DATA_TOP>/pg_encryption/key.bin`** (EDB docs: 
 export THALES_PASS='...'                                   # from the secrets manager
 sudo modules/01-provision/epas-base-build-root.sh          # first: packages, binaries, dirs, systemd drop-in
 sudo -E modules/08-tde/tde-thales-setup.sh                 # conf/tde.env by default
-sudo -iu enterprisedb /opt/dba/edb_toolkit/modules/01-provision/epas-base-build-db.sh --tag PROD   # keeps the cluster: conf.d + registry
+/opt/dba/edb_toolkit/modules/01-provision/epas-base-build-db.sh --tag PROD   # as enterprisedb; keeps the cluster: conf.d + registry
 sudo systemctl start edb-as-17
 ```
 

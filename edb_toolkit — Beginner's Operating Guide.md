@@ -1,10 +1,23 @@
 # edb\_toolkit — Beginner's Operating Guide
 
-Nov 4, 2026 · @Vinay
+Nov 4, 2026 · updated Nov 14, 2026 · @Vinay
+
+## Which section for which job
+
+| I want to... | Go to |
+|---|---|
+| Get the toolkit onto a server | Section 1 (Git, a bundle file, or pasted text) |
+| Build a new cluster | Section 2 |
+| Bring an existing server under the toolkit | Section 3 |
+| Do my daily work as the DBA | Section 4 |
+| Find and fix drift | Section 5 |
+| Update the toolkit or roll it back | Section 6 |
+| Know the limits and what is still unproven | Section 7 |
+| Patch, back up, upgrade, set up EFM, SSL or TDE | Section 8 (points to the module READMEs) |
 
 ## 0. How the toolkit fits together
 
-The toolkit lives in five places on a server, and each place has exactly one owner and one writer. Once you know which is which, every command in this guide makes sense. Written against `edb_toolkit` v1.3.1 (commit 7287054).
+The toolkit lives in five places on a server, and each place has exactly one owner and one writer. Once you know which is which, every command in this guide makes sense. Last checked against `edb_toolkit` v3.2.0. Version numbers in the examples are examples; use your own tag.
 
 | Place | Path | Owner | What it holds | Who changes it |
 | --- | --- | --- | --- | --- |
@@ -20,13 +33,13 @@ Only `install.sh` changes `/opt`; only the toolkit's scripts write under `/etc/e
 
 Every change a script makes is also written as an `[AUDIT]` line to that run's log file in `/pglog/toolkit/` (`TOOLKIT_LOG_DIR`), and to syslog (tag `edb-toolkit-audit`) when `TOOLKIT_SYSLOG="yes"`.
 
-**Who runs what.** Root does packages, directories, systemd and installing the toolkit. The database OS user (`enterprisedb`, called `SYSTEM_USER` in the config) does everything else: building the cluster, the registry, daily work. If a step below starts with `sudo`, it is a root step; if it starts after `sudo -iu enterprisedb`, it is a DB-user step.
+**Who runs what.** The sysadmin does the root work: packages, folders, systemd, files in `/etc`, installing the toolkit. The database OS user (`enterprisedb`, called `SYSTEM_USER` in the config) does everything else. The full table is in `docs/who-runs-what.md`. In this guide, a step that starts with `sudo` is a root step. A step run "as enterprisedb" is a database-user step. `sudo -iu enterprisedb` means "become the database user", however your site allows that. It is not in the toolkit's sudo whitelist, and no script runs it for you.
 
 **Conventions you will see everywhere**
 
 - Cluster names are `as<major>`, plus `_<suffix>` for a second cluster of the same version: `as17`, `as17_rpt`.
 - Environment tags are `DEV`, `SIT`, `PAT`, `PROD`. A DR copy of production is `PROD`. The toolkit never guesses a tag; you always give it.
-- Scripts that change something first print the values they will use, then ask `About to: … — Proceed? (y/N)`. `--yes` skips the question. In a non-interactive run (Ansible, cron) they proceed without asking.
+- Scripts that change something first print the values they will use, then ask `About to: … — Proceed? (y/N)`. `--yes` skips the question. Without a terminal (cron, Ansible) they proceed without asking, but pass `--yes` anyway so it is explicit. Exit codes: `0` done, `1` refused or failed, `2` done but not confirmed.
 - `--env <file>` picks a config file; without it, scripts use `conf/site.env` inside the toolkit. `--help` works on every script.
 - Log lines look like `[2026-11-04 22:14:07.512] [INFO] [epastab.sh] Wrote …`. In the examples below the timestamp is trimmed.
 
@@ -34,7 +47,7 @@ Nothing has been run on a real EPAS server yet (that is the next roadmap item), 
 
 ## 1. Get the toolkit onto a server
 
-Pick a tag (e.g. `v1.3.1`), get that exact version onto the server by Git, by bundle or by paste kit, then run `sudo tools/install.sh` from it. All three roads end in the same `/opt/dba/edb_toolkit`.
+Pick a tag (e.g. `v3.2.0`), get that exact version onto the server by Git, by bundle or by paste kit, then run `sudo tools/install.sh` from it. All three roads end in the same `/opt/dba/edb_toolkit`.
 
 ### Road A — the server can reach Git
 
@@ -42,8 +55,8 @@ Pick a tag (e.g. `v1.3.1`), get that exact version onto the server by Git, by bu
 # on the server, as your own admin account (not enterprisedb)
 cd ~ && git clone https://<your-git-server>/dba/edb_toolkit.git
 cd edb_toolkit
-git checkout v1.3.1        # install a tag, never "whatever main is today"
-make test                  # 51 unit tests; needs no database and no root
+git checkout v3.2.0        # install a tag, never "whatever main is today"
+make test                  # all unit tests; needs no database and no root
 sudo tools/install.sh      # same as: sudo make install
 ```
 
@@ -52,21 +65,21 @@ sudo tools/install.sh      # same as: sudo make install
 On your laptop, build a bundle from the tag. It contains only committed files (never your local `conf/site.env`) and warns you if you have uncommitted changes.
 
 ```bash
-cd edb_toolkit && git checkout v1.3.1
+cd edb_toolkit && git checkout v3.2.0
 make bundle
-# Bundle:   …/edb_toolkit/dist/edb_toolkit-v1.3.1.tar.gz
-# Checksum: …/edb_toolkit/dist/edb_toolkit-v1.3.1.tar.gz.sha256
-# Version:  v1.3.1 (<commit date>)
-scp dist/edb_toolkit-v1.3.1.tar.gz* admin@dbhost01:/tmp/
+# Bundle:   …/edb_toolkit/dist/edb_toolkit-v3.2.0.tar.gz
+# Checksum: …/edb_toolkit/dist/edb_toolkit-v3.2.0.tar.gz.sha256
+# Version:  v3.2.0 (<commit date>)
+scp dist/edb_toolkit-v3.2.0.tar.gz* admin@dbhost01:/tmp/
 ```
 
 On the server, check the file arrived intact before you unpack it:
 
 ```bash
 cd /tmp
-sha256sum -c edb_toolkit-v1.3.1.tar.gz.sha256
-# edb_toolkit-v1.3.1.tar.gz: OK
-tar xzf edb_toolkit-v1.3.1.tar.gz
+sha256sum -c edb_toolkit-v3.2.0.tar.gz.sha256
+# edb_toolkit-v3.2.0.tar.gz: OK
+tar xzf edb_toolkit-v3.2.0.tar.gz
 sudo edb_toolkit/tools/install.sh
 ```
 
@@ -103,11 +116,11 @@ It copies the toolkit to `/opt/dba/edb_toolkit`, owned by root (dirs 755, files 
 ```text
   SRC     = /tmp/edb_toolkit
   PREFIX  = /opt/dba/edb_toolkit
-  VERSION = v1.3.1 (2026-11-04)
+  VERSION = v3.2.0 (2026-11-04)
   CURRENT = none
-About to: install edb_toolkit v1.3.1 (2026-11-04) into /opt/dba/edb_toolkit (current: none; it is kept as /opt/dba/edb_toolkit.prev) — Proceed? (y/N): y
+About to: install edb_toolkit v3.2.0 (2026-11-04) into /opt/dba/edb_toolkit (current: none; it is kept as /opt/dba/edb_toolkit.prev) — Proceed? (y/N): y
 [INFO] [install.sh] Linked /usr/local/bin/epasenv -> /opt/dba/edb_toolkit/tools/epasenv.sh  (use: . epasenv <cluster>)
-[AUDIT] [install.sh] edb_toolkit v1.3.1 (2026-11-04) installed in /opt/dba/edb_toolkit (previous: none)
+[AUDIT] [install.sh] edb_toolkit v3.2.0 (2026-11-04) installed in /opt/dba/edb_toolkit (previous: none)
 [INFO] [install.sh] Done. Roll back with: sudo mv /opt/dba/edb_toolkit /opt/dba/edb_toolkit.bad && sudo mv /opt/dba/edb_toolkit.prev /opt/dba/edb_toolkit
 ```
 
@@ -115,7 +128,7 @@ Check it:
 
 ```bash
 cat /opt/dba/edb_toolkit/VERSION
-# v1.3.1 (2026-11-04)
+# v3.2.0 (2026-11-04)
 # installed 2026-11-04 22:10:31 EST by vinay from /tmp/edb_toolkit
 ls -l /usr/local/bin/epasenv
 ```
@@ -529,13 +542,25 @@ An update is the same install as step 1 with a newer tag; a rollback swaps `/opt
 
 ### 6.1 Make the change (on your laptop)
 
+`main` is protected: you cannot push to it directly. Every change goes through a branch and a pull request (the full routine is in your Git cheatsheet).
+
 ```bash
 cd edb_toolkit
+git switch main && git pull
+git switch -c fix/short-description
 # … edit …
 make lint && make test              # same checks CI runs on every push
-git commit -am "epastab: warn when pg_service.local.conf is unreadable"   # say what changed, not "1"
-git tag -a v1.3.2 -m "v1.3.2"
-git push && git push --tags
+git add -A
+git commit -m "Warn when pg_service.local.conf is unreadable"   # say what changed, not "1"
+git push -u origin fix/short-description
+```
+
+On GitHub: open the pull request, wait for the green tick, **Squash and merge**. Then tag the merged commit:
+
+```bash
+git switch main && git pull
+git tag -a v3.3.0 -m "v3.3.0: one-line summary"
+git push origin v3.3.0
 ```
 
 ### 6.2 Roll it out to a server
@@ -544,14 +569,15 @@ git push && git push --tags
 cat /opt/dba/edb_toolkit/VERSION            # what runs now (note it down)
 
 # Road A: Git
-cd ~/edb_toolkit && git fetch --tags && git checkout v1.3.2
+cd ~/edb_toolkit && git fetch --tags && git checkout v3.3.0
 sudo tools/install.sh
 
 # Road B: bundle (make bundle on the laptop, copy, sha256sum -c, untar, as in step 1)
+# Road C: paste kit (make paste-kit on the laptop, paste the parts, as in step 1)
 sudo /tmp/edb_toolkit/tools/install.sh
 ```
 
-The confirmation line names both versions, e.g. `install edb_toolkit v1.3.2 (…) into /opt/dba/edb_toolkit (current: v1.3.1 (…); it is kept as /opt/dba/edb_toolkit.prev)`, and you will see `Kept host config: conf/site.env`.
+The confirmation line names both versions, e.g. `install edb_toolkit v3.3.0 (…) into /opt/dba/edb_toolkit (current: v3.2.0 (…); it is kept as /opt/dba/edb_toolkit.prev)`, and you will see `Kept host config: conf/site.env`.
 
 Then a 30-second smoke test, as enterprisedb:
 
@@ -578,7 +604,7 @@ sudo mv /opt/dba/edb_toolkit /opt/dba/edb_toolkit.bad && sudo mv /opt/dba/edb_to
 cat /opt/dba/edb_toolkit/VERSION                 # the old version again
 ```
 
-Cleanest, to any version: reinstall the older tag (`git checkout v1.3.1 && sudo tools/install.sh`, or its bundle). `/usr/local/bin/epasenv` points at the `/opt/dba/edb_toolkit` path, so it follows either way.
+Cleanest, to any version: reinstall the older tag (`git checkout v3.2.0 && sudo tools/install.sh`, or its bundle). `/usr/local/bin/epasenv` points at the `/opt/dba/edb_toolkit` path, so it follows either way.
 
 Know the limits of `.prev`:
 
@@ -592,15 +618,26 @@ Know the limits of `.prev`:
 > - Keep a one-line log per rollout (server, from, to, date). `cat /opt/dba/edb_toolkit/VERSION` on each host, or an Ansible ad-hoc run, rebuilds it in minutes.
 > - Never hot-fix a script in `/opt` during an incident. Use the rollback, then fix it in Git.
 
-## 7. Gotchas I found in the repo while writing this
+## 7. Known limits and what is still unproven
 
-One of these will bite on the first real server: `pgstart` / `pgstop` via systemd will ask enterprisedb for a sudo password. The rest are small.
+1. **Nothing has run on a real EPAS server yet.** The unit tests use fake commands, so they prove the logic, not the real tools. Expect small differences from the example output in this guide, and try everything on DEV first.
+2. **`epastab.sh` is not on the PATH.** Only `epasenv` gets a link in `/usr/local/bin`. Use the `alias` from step 3.3, or ask the sysadmin for a second link.
+3. **`.prev` keeps one previous version** (step 6.3). For anything older, reinstall the tag.
+4. **Old clusters may keep the TDE passphrase in plain text in `postgresql.conf`.** The new build refuses that form and uses a passphrase file instead; clusters built with the old script need migrating.
+5. **The sudoers whitelist is installed once per server** (`sudo install -m 0440 conf/sudoers.d/epas-automation /etc/sudoers.d/epas-automation`). Install it again after upgrading from before v3.0.0; EPAS 18 was added.
+6. **A standalone database has one copy of its TDE passphrase file.** Keep a second copy in your vault (see section 0).
 
-1. **sudoers does not match what pgstart runs.** `pg_bashrc.txt` calls `sudo systemctl start edb-as-17.service`; `conf/sudoers.d/epas-automation` allows `/bin/systemctl start edb-as-17`, without `.service`. sudo compares arguments literally, so the rule does not apply. Fix one side: add the `.service` forms to the sudoers file, or drop `.service` in `__epas_ctl`. (The build script's own hint, `sudo systemctl start edb-as-17`, does match.)
-2. **sudoers has no EPAS 16 lines**, only 15 and 17. Its header also says `config/sudoers.d/` where the repo has `conf/sudoers.d/`.
-3. **`epastab.sh` is not on PATH.** Only `epasenv` gets a `/usr/local/bin` link. Either add a second link in `install.sh` or the `alias epastab=…` from step 3 to `pg_bashrc.txt`.
-4. **`.prev` keeps one version.** Fine if you know it (step 6.3); worth one line in the README.
-5. **The README has no "Install on a server" section** (still on the roadmap). Sections 1, 4 and 6 of this guide could be cut down into it.
-6. **Already parked, still open:** clusters built with the old script have the TDE passphrase in `postgresql.conf`.
+## 8. Other jobs: where to look
 
-The next roadmap step still stands: run the split build on one real non-prod server and bring back the `epastab.sh check` output. That run will also confirm the example output in this guide.
+These jobs have their own README. Each lists the scripts, who runs them, and the order.
+
+| Job | Read |
+|---|---|
+| Patch a node (stop, sysadmin `dnf`, start) | `modules/03-patching/README.md` |
+| Backups, WAL archiving, restore test | `modules/06-backup/README.md` |
+| Major version upgrade | `modules/04-upgrade/README.md`, `docs/epas-major-upgrade-efm.md`, `docs/epas-upgrade-rehearsal.md` |
+| EFM setup and status | `modules/05-efm/README.md` |
+| SSL certificates | `modules/02-ssl/README.md` |
+| TDE and Thales | `modules/08-tde/README.md` |
+| Kernel and memory tuning | `modules/07-tuning/README.md` |
+| Run a job with no person present | `docs/ansible-readiness.md` |
