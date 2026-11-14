@@ -21,6 +21,7 @@ modules/
   07-tuning/          Kernel HugePages/memory tuning, shared_buffers planning, verification, sql/ monitoring
   08-tde/             TDE with Thales CipherTrust (KMIP): new setup, openssl-passphrase → Thales migration
 tools/                get-edb-inventory.sh — what EDB software/config is on this host
+                      make-bundle.sh, make-paste-kit.sh — package the toolkit for servers without Git (file copy, or paste only)
 docs/                 who-runs-what (sysadmin vs DBA), package install recommendation, multi-day tuning audit procedure
 tests/lint.sh         bash -n + CRLF check (+ shellcheck); run by CI (.github/workflows/lint.yml)
 ```
