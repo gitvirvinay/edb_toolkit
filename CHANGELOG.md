@@ -22,6 +22,11 @@ What changed in edb_toolkit, newest first. Updated together with every change.
     file, builds the corrected copy in `<log directory>/efm/` (mode 600) and prints the two commands for the sysadmin (backup, then
     `install -o <owner> -g <group> -m <mode>`). Running it again says "already up to date" once the sysadmin has done that.
     New `tests/efm-reconfigure-unit.sh` (27 tests), added to `make test` and CI.
+  - **Breaking: `efm-setup.sh` no longer runs as root, installs nothing and has no `--no-install` / `--start`.** The DBA runs it: it builds the
+    properties, nodes and (for a cluster not named `efm`) unit file in `<log directory>/efm/<cluster>/`, compares them with the installed
+    files and prints the root commands for the sysadmin (`dnf install`, backup, `install -o efm -g efm -m 600 ...`, `daemon-reload`).
+    Running it again says "already installed". The DBA starts the agent with `sudo systemctl enable/start <unit>` (whitelist).
+    New `tests/efm-setup-unit.sh` (44 tests), added to `make test` and CI.
   - `conf/sudoers.d/epas-automation`: EPAS 18 added (start, stop, restart, reload).
 
 - **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the
