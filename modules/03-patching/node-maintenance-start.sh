@@ -11,6 +11,14 @@
 # --patched: after the sysadmin has installed new packages (dnf). Checks that the package version
 #            changed (nothing is started if not), then runs edb_sqlpatch on a primary before EFM starts.
 # The counterpart of node-maintenance-stop.sh. Safe to run again.
+#
+# Unattended use (Ansible, cron): pass --yes. sudo is called with -n, so a missing sudoers entry fails at
+# once instead of waiting for a password. Exit codes:
+#   0  node back in service, EFM reports the cluster (or HA_TOOL=none)
+#   1  error: the message says what was not started
+#   2  EPAS is running, but EFM did not confirm the cluster in time: a person must look before the
+#      next node is touched (a playbook stops here instead of patching the next node)
+# EFM_WAIT_TRIES / EFM_WAIT_SECS (default 12 x 5 s) set how long to wait for EFM.
 # =============================================================================
 set -euo pipefail
 
@@ -31,6 +39,9 @@ HA_TOOL=none: EPAS is started and checked; the EFM steps are skipped.
   edb-as<ver>-server really changed since node-maintenance-stop.sh (if not, NOTHING is started), then
   starts EPAS, runs edb_sqlpatch if this node is a primary (a standby gets the changes by replication),
   and only then starts EFM. Without --patched nothing about packages is checked (plain reboot).
+Unattended: pass --yes. Exit codes: 0 = node back in service and EFM reports the cluster (or HA_TOOL=none);
+  1 = error, the message says what was not started; 2 = EPAS is running but EFM did not confirm the
+  cluster in time - a person must look before the next node is touched.
 USAGE
     exit 0
 }
@@ -65,7 +76,7 @@ if [ "$PATCHED" = 1 ]; then
 fi
 
 log_info "Bringing ${NODE} back into service"
-sudo systemctl start "$EPAS_SERVICE" \
+sudo -n systemctl start "$EPAS_SERVICE" \
     || die "Could not start ${EPAS_SERVICE} - EFM NOT started. Check: sudo systemctl status ${EPAS_SERVICE}"
 
 wait_for_epas 12 5 || die "EPAS did not accept connections on port ${PRIMARY_PORT} within 60s — EFM NOT started. Check: sudo systemctl status ${EPAS_SERVICE}"
@@ -90,21 +101,25 @@ if [ "$HA_TOOL" != "efm" ]; then
     exit 0
 fi
 
-sudo systemctl enable "$EFM_SERVICE" \
+sudo -n systemctl enable "$EFM_SERVICE" \
     || die "EPAS is running, but ${EFM_SERVICE} could not be enabled - this node is NOT back in the EFM cluster. Check: sudo systemctl status ${EFM_SERVICE}"
-sudo systemctl start "$EFM_SERVICE" \
+sudo -n systemctl start "$EFM_SERVICE" \
     || die "EPAS is running, but ${EFM_SERVICE} could not be started - this node is NOT back in the EFM cluster. Check: sudo systemctl status ${EFM_SERVICE}"
 
 log_info "Waiting for EFM to report the cluster..."
-for i in {1..12}; do
-    if sudo "$EFM" cluster-status "$EFM_CLUSTER_NAME" &>/dev/null; then
+EFM_WAIT_TRIES="${EFM_WAIT_TRIES:-12}"; EFM_WAIT_SECS="${EFM_WAIT_SECS:-5}"
+i=1
+while [ "$i" -le "$EFM_WAIT_TRIES" ]; do
+    if sudo -n "$EFM" cluster-status "$EFM_CLUSTER_NAME" &>/dev/null; then
         log_info "EFM cluster status: healthy"
         vip_status
         log_audit "Node back in service after maintenance: ${NODE}, ${EPAS_SERVICE}, ${EFM_SERVICE}"
         exit 0
     fi
-    log_warn "Waiting for EFM to stabilize... ($i/12)"
-    sleep 5
+    log_warn "Waiting for EFM to stabilize... ($i/${EFM_WAIT_TRIES})"
+    sleep "$EFM_WAIT_SECS"
+    i=$((i + 1))
 done
-log_warn "EFM status check timed out. Verify manually with: sudo ${EFM} cluster-status ${EFM_CLUSTER_NAME}"
+log_error "EPAS is running, but EFM did not report the cluster in time - this node is NOT confirmed back in the EFM cluster. Check: sudo ${EFM} cluster-status ${EFM_CLUSTER_NAME}"
 log_audit "Node started after maintenance, EFM status NOT confirmed: ${NODE}, ${EPAS_SERVICE}, ${EFM_SERVICE}"
+exit 2
