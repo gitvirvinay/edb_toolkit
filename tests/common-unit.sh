@@ -238,6 +238,11 @@ grep -q 'confirm_destructive' tools/epas_full_uninstall.sh; eq "asks for the hos
 out=$(grep -nE 'rm -rf.*(DATA_TOP|WAL_TOP|ARCHIVE_TOP|BACKUP_TOP|LOG_TOP|BINARY_TOP|/pgdata|/pgwal|/pgarchive|/pgbackup|/pglog)' tools/epas_full_uninstall.sh)
 eq "never deletes the cluster mounts"                   "" "$out"
 
+echo "== run_as_db_user (the DBA has no 'sudo -u enterprisedb' rule)"
+rdu() { bash -c "source '$ROOT/lib/common.sh'; sudo() { echo \"SUDO \$*\"; }; SYSTEM_USER='$1'; run_as_db_user echo hello" 2>&1; }
+eq  "already the database user: runs directly, no sudo"   "hello" "$(rdu "$(id -un)")"
+eq  "another user (e.g. root): goes through sudo -u"      "SUDO -u nobody-else echo hello" "$(rdu nobody-else)"
+
 echo "== Template (conf/site.env.example)"
 out=$(bash -c 'set -u; source conf/site.env.example; echo "$APP_CODE|$SITE|$HA_TOOL|$BACKUP_TOOL"' 2>&1)
 eq "standard values"                            "|primary|efm|basebackup" "$out"

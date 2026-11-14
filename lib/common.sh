@@ -195,13 +195,24 @@ confirm_destructive() {
     log_audit "Destructive action on ${host} confirmed by $(whoami): $*"
 }
 
+# run_as_db_user CMD... — run a command as SYSTEM_USER (the database OS user).
+# Already that user (the normal DBA run): the command runs directly, with no sudo - the DBA has
+# no sudo rule for "sudo -u enterprisedb", and needs none. Root (or another user): through 'sudo -u'.
+run_as_db_user() {
+    if [ "$(id -un)" = "${SYSTEM_USER:?SYSTEM_USER is not set}" ]; then
+        "$@"
+    else
+        sudo -u "$SYSTEM_USER" "$@"
+    fi
+}
+
 # wait_for_epas [tries] [seconds] — pg_isready on PRIMARY_PORT as SYSTEM_USER; returns 1 on timeout
 wait_for_epas() {
     local tries="${1:-12}" secs="${2:-5}" i bin
     bin="${SRC_BINARY_DIR:-/usr/edb/as${EPAS_VERSION}}/bin/pg_isready"
     [ -x "$bin" ] || bin="pg_isready"
     for ((i = 1; i <= tries; i++)); do
-        if sudo -u "$SYSTEM_USER" "$bin" -q -p "$PRIMARY_PORT"; then
+        if run_as_db_user "$bin" -q -p "$PRIMARY_PORT"; then
             log_info "EPAS is accepting connections on port ${PRIMARY_PORT}."
             return 0
         fi
