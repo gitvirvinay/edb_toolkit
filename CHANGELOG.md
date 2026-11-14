@@ -2,6 +2,24 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
+## v3.2.0 - 2026-11-14
+
+**Patching scripts are ready for unattended use (Ansible, cron).** See `docs/ansible-readiness.md` for the contract and for
+which scripts still are not.
+
+- `node-maintenance-start.sh` now **exits 2** when EPAS is running but EFM did not report the cluster within the wait
+  (before: a warning and exit 0, so a playbook would have gone on to patch the next node). `EFM_WAIT_TRIES` and
+  `EFM_WAIT_SECS` (default 12 x 5 s) set the wait.
+- Both patching scripts call `sudo -n`: a missing sudoers entry fails at once instead of waiting for a password.
+- `node-maintenance-stop.sh` run a second time on an already stopped node (a retry after the sysadmin's `dnf`) keeps the first
+  note of the package version, so `node-maintenance-start.sh --patched` still sees the update.
+- Usage text and headers of both scripts list the exit codes. 14 new checks in `tests/common-unit.sh`.
+
+| Before | Now |
+|---|---|
+| `node-maintenance-start.sh`, EFM not confirmed: exit 0 | exit 2 |
+| plain `sudo systemctl ...` | `sudo -n systemctl ...` |
+
 ## v3.1.0 - 2026-11-13
 
 **New: paste kit for servers where only text can be copied.** `tools/make-paste-kit.sh` (or `make paste-kit`) builds
