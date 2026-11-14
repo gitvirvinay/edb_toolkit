@@ -2,6 +2,21 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
+## v3.2.1 - 2026-11-14
+
+**Documentation only. No script changes.** A review of every doc against the code found stale parts; they are fixed.
+
+- `README.md` is now a start page: a "which document for which job" table, a corrected quick start (the SSL step no longer says `sudo`, the
+  generator is `generate-site-env.sh`), the rules that are the same in every script, and an up-to-date folder list.
+- Beginner's Guide: a job map at the top, a refreshed "Known limits" section (replaces the old gotchas, two of which were fixed), a new section 8
+  pointing to the module READMEs, a release routine that uses a pull request (the old one pushed straight to the protected `main`), and
+  example versions that match the repo.
+- `sudo -iu enterprisedb` is explained once: it means "become the database user"; it is not in the sudo whitelist and no script runs it.
+  The module READMEs show the commands as run by that user.
+- `03-patching` README: exit codes 0, 1 and 2, `sudo -n`, `--yes`.
+- `docs/v2-design.md` is marked historical.
+- `conf/site.env.example` lists `RESTORE_EVIDENCE_DIR`.
+
 ## v3.2.0 - 2026-11-14
 
 **Patching scripts are ready for unattended use (Ansible, cron).** See `docs/ansible-readiness.md` for the contract and for
