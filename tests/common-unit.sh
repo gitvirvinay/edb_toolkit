@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
 done
 exec "$@"
 FAKE
-# systemctl:
+# systemctl: a "stop UNIT" removes UNIT from $T/active, unless $T/stuck exists (a stop that does nothing)
 #   list-units        prints the agents named in $T/agents (one unit per line)
 #   is-active UNIT    exit 0 if UNIT is named in $T/active, else 3 (not recorded)
 #   anything else     is recorded; it fails (exit 1) if its text is a line of $T/fail
@@ -48,11 +48,12 @@ if [ "\$1" = "is-active" ]; then
 fi
 echo "systemctl \$*" >> "$T/calls"
 [ -f "$T/fail" ] && grep -qx "\$*" "$T/fail" && exit 1
+if [ "\$1" = "stop" ] && [ -f "$T/active" ] && [ ! -f "$T/stuck" ]; then grep -vx "\$2" "$T/active" > "$T/active.n"; mv "$T/active.n" "$T/active"; fi
 exit 0
 FAKE
 printf '#!/bin/sh\necho "dnf $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/dnf"
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/pg_isready"
-printf '#!/bin/sh\necho "efm $*" >> "%s/calls"\nexit 0\n' "$T" > "$T/bin/efm"
+printf '#!/bin/sh\necho "efm $*" >> "%s/calls"\n[ "$1" = cluster-status ] && [ -f "%s/efm_fail" ] && exit 1\nexit 0\n' "$T" "$T" > "$T/bin/efm"
 printf '#!/bin/sh\necho "ip $*" >> "%s/ipcalls"\nexit 0\n' "$T" > "$T/bin/ip"
 # rpm: prints the version in $T/pkgver (fails if the file is missing); psql: prints $T/inrec (default f);
 # edb_sqlpatch: recorded.
@@ -170,8 +171,9 @@ for site in primary dr; do
     has "EPAS stop fails: says EFM is already off" "edb-efm-5.3 is already stopped and disabled" "$out"
     hasnt "EPAS stop fails: no audit line"         "[AUDIT]" "$out"
     rm -f "$T/fail"
-    echo "edb-as-17" > "$T/active"
+    echo "edb-as-17" > "$T/active"; : > "$T/stuck"          # a stop that does nothing
     out=$(run "$down"); rc=$?
+    rm -f "$T/stuck"
     eq "EPAS still running after the stop: exit code 1" "1" "$rc"
     has "EPAS still running after the stop: says so"    "edb-as-17 is still running after the stop" "$out"
     hasnt "EPAS still running after the stop: no audit line" "[AUDIT]" "$out"
@@ -268,6 +270,41 @@ echo "== run_as_db_user (the DBA has no 'sudo -u enterprisedb' rule)"
 rdu() { bash -c "source '$ROOT/lib/common.sh'; sudo() { echo \"SUDO \$*\"; }; SYSTEM_USER='$1'; run_as_db_user echo hello" 2>&1; }
 eq  "already the database user: runs directly, no sudo"   "hello" "$(rdu "$(id -un)")"
 eq  "another user (e.g. root): goes through sudo -u"      "SUDO -u nobody-else echo hello" "$(rdu nobody-else)"
+
+echo "== Unattended use (Ansible, cron): no waiting, clear exit codes"
+rm -f "$T/agents" "$T/active" "$T/fail" "$T/inrec" "$T/sqlpatch_fail" "$T/efm_fail"; rm -rf "$T/logs/patching"
+env_file
+echo "17.5-1" > "$T/pkgver"
+bad_sudo="$(grep -nE '^[[:space:]]*(if )?sudo [^-]' modules/03-patching/*.sh)"
+eq  "patching scripts call sudo only with -n (fail fast, never wait for a password)" "" "$bad_sudo"
+echo "edb-as-17" > "$T/active"
+out=$(run "$down" --yes); rc=$?
+eq  "stop on a running node: exit code 0"                "0" "$rc"
+eq  "... notes 17.5-1"                                   "17.5-1" "$(cat "$T"/logs/patching/*_edb-as-17.version 2>/dev/null)"
+echo "17.6-1" > "$T/pkgver"                                # the sysadmin's dnf ran
+out=$(run "$down" --yes); rc=$?
+eq  "stop run again after dnf (retry): exit code 0"      "0" "$rc"
+has "... says it kept the earlier note"                  "already stopped: keeping the earlier note" "$out"
+eq  "... and the note still says 17.5-1"                 "17.5-1" "$(cat "$T"/logs/patching/*_edb-as-17.version 2>/dev/null)"
+out=$(run "$up" --patched --yes); rc=$?
+eq  "start --patched after that retry: exit code 0"      "0" "$rc"
+has "... sees the change 17.5-1 -> 17.6-1"               "Packages changed: 17.5-1 -> 17.6-1" "$out"
+echo "edb-as-17" > "$T/active"; echo "17.7-1" > "$T/pkgver"
+out=$(run "$down" --yes); rc=$?
+eq  "stop on a running node again: the note is replaced" "17.7-1" "$(cat "$T"/logs/patching/*_edb-as-17.version 2>/dev/null)"
+: > "$T/efm_fail"
+out=$(EFM_WAIT_TRIES=2 EFM_WAIT_SECS=0 run "$up" --yes); rc=$?
+eq  "start, EFM never reports the cluster: exit code 2"  "2" "$rc"
+has "... says EFM did not report the cluster"            "EFM did not report the cluster in time" "$out"
+has "... EPAS and EFM were started before that"          "systemctl start edb-as-17;systemctl enable edb-efm-5.3;systemctl start edb-efm-5.3;" "$(calls)"
+has "... the audit line says NOT confirmed"              "EFM status NOT confirmed" "$(cat "$T"/logs/* 2>/dev/null)"
+rm -f "$T/efm_fail"
+out=$(EFM_WAIT_TRIES=2 EFM_WAIT_SECS=0 run "$up" --yes); rc=$?
+eq  "start, EFM reports the cluster: exit code 0"        "0" "$rc"
+env_file 'HA_TOOL="none"'
+out=$(run "$up" --yes); rc=$?
+eq  "start with HA_TOOL=none: exit code 0 (no EFM to wait for)" "0" "$rc"
+rm -f "$T/active"; rm -rf "$T/logs/patching"
 
 echo "== Template (conf/site.env.example)"
 out=$(bash -c 'set -u; source conf/site.env.example; echo "$APP_CODE|$SITE|$HA_TOOL|$BACKUP_TOOL"' 2>&1)

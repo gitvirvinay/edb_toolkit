@@ -14,6 +14,11 @@
 # node-maintenance-start.sh --patched can check that the sysadmin's dnf really changed it.
 # Stops with an error, and writes no audit line, if EFM or EPAS cannot be stopped.
 # One node at a time. Bring the node back with node-maintenance-start.sh.
+#
+# Unattended use (Ansible, cron): pass --yes. sudo is called with -n, so a missing sudoers entry fails
+# at once instead of waiting for a password. Exit codes: 0 = node out of service; 1 = refused or failed
+# (the message says what was and was not stopped). Run again after a failure: stopping what is already
+# stopped is harmless, and an earlier note of the package version is kept (see below).
 # =============================================================================
 set -euo pipefail
 
@@ -29,6 +34,7 @@ stops EPAS (left enabled). Bring it back with node-maintenance-start.sh.
 Settings: EPAS_VERSION/SERVICE_NAME, EFM_VERSION, HA_TOOL, SITE - from conf/site.env (required).
 HA_TOOL=none: the EFM steps are skipped; stops if an EFM agent is running on this host after all.
 SITE=primary: also lists this node's IP addresses (where is the VIP?). SITE=dr: no list.
+Unattended: pass --yes. Exit codes: 0 = out of service; 1 = refused or failed. Safe to run again.
 USAGE
     exit 0
 }
@@ -51,9 +57,9 @@ if [ "$HA_TOOL" = "efm" ] && [ "$SITE" = "primary" ]; then vip_status; fi
 if [ "$HA_TOOL" = "efm" ]; then
     # A failed stop is never ignored here: with the agent still running, stopping EPAS below
     # would look like a database failure to EFM and could cause a failover.
-    sudo systemctl stop "$EFM_SERVICE" \
+    sudo -n systemctl stop "$EFM_SERVICE" \
         || die "Could not stop ${EFM_SERVICE}. EPAS was NOT stopped and nothing else was changed. Check: sudo systemctl status ${EFM_SERVICE}"
-    sudo systemctl disable "$EFM_SERVICE" \
+    sudo -n systemctl disable "$EFM_SERVICE" \
         || die "${EFM_SERVICE} is stopped but could not be disabled (it would start again after a reboot). EPAS was NOT stopped. Check: sudo systemctl status ${EFM_SERVICE}"
     UNDO_HINT=" ${EFM_SERVICE} is already stopped and disabled; node-maintenance-start.sh brings the node back."
     HA_NOTE="$EFM_SERVICE"
@@ -68,7 +74,8 @@ if [ "$SITE" = "primary" ]; then
     ip addr show | grep -E "inet .* scope global" || true     # information only; no match is not an error
 fi
 
-sudo systemctl stop "$EPAS_SERVICE" \
+EPAS_WAS_RUNNING=1; systemctl is-active --quiet "$EPAS_SERVICE" || EPAS_WAS_RUNNING=0
+sudo -n systemctl stop "$EPAS_SERVICE" \
     || die "Could not stop ${EPAS_SERVICE} - this node is NOT ready for maintenance.${UNDO_HINT} Check: sudo systemctl status ${EPAS_SERVICE}"
 # Believe the service state, not the exit code of the stop: only a stopped database is ready.
 if systemctl is-active --quiet "$EPAS_SERVICE"; then
@@ -78,7 +85,10 @@ log_info "${EPAS_SERVICE} is stopped"
 
 # Note the package version now: the sysadmin's dnf comes next (best effort - it only helps the later check).
 PRE_VER="$(epas_pkg_version)"; STATE_FILE="$(patch_state_file)"
-if [ -n "$PRE_VER" ] && [ -n "$STATE_FILE" ] \
+if [ "$EPAS_WAS_RUNNING" = 0 ] && [ -n "$STATE_FILE" ] && [ -s "$STATE_FILE" ]; then
+    # Run a second time after the sysadmin's dnf (a retry): the first note is the one that proves the update.
+    log_info "${EPAS_SERVICE} was already stopped: keeping the earlier note of the package version ($(head -n1 "$STATE_FILE"))"
+elif [ -n "$PRE_VER" ] && [ -n "$STATE_FILE" ] \
    && { mkdir -p "$(dirname "$STATE_FILE")" && printf '%s\n' "$PRE_VER" > "$STATE_FILE"; } 2>/dev/null; then
     log_info "Installed edb-as${EPAS_VERSION}-server is ${PRE_VER} (noted for node-maintenance-start.sh --patched)"
 else
