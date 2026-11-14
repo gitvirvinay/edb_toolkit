@@ -16,6 +16,8 @@ What changed in edb_toolkit, newest first. Updated together with every change.
     `edb_sqlpatch` as the DBA on a primary only (not on a standby), and only then starts EFM. Without `--patched`, behaviour is unchanged.
   - The VIP check is information only now (and silent when `VIP_ADDRESS` is empty); the old "continue despite missing VIP?" question is gone.
   - `lib/common.sh`: new `run_as_db_user` (runs directly when already the DB user, no `sudo -u`); `wait_for_epas` uses it; new `epas_cmd`.
+  - **Breaking: `epas-major-pgupgrade.sh` and `epas-major-pgrestore.sh` no longer have `--root`.** They run as the database OS user only
+    (they already did by default); the sysadmin installs the EPAS packages beforehand. `--root` now stops with a message saying so.
   - `conf/sudoers.d/epas-automation`: EPAS 18 added (start, stop, restart, reload).
 
 - **New: `modules/06-backup/restore-test.sh` - proves a base backup really restores.** It picks the

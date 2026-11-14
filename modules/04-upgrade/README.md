@@ -7,11 +7,9 @@ Settings come from `conf/site.env` (required): the **new** cluster (`EPAS_VERSIO
 ## `epas-major-pgupgrade.sh` — pg_upgrade (recommended path)
 
 ```bash
-# as the EPAS OS user
+# as the EPAS OS user (never root: the old --root option was removed). The sysadmin installs the new EPAS packages first.
 modules/04-upgrade/epas-major-pgupgrade.sh            # copy mode (needs free space ≈ old cluster + 10 %)
 modules/04-upgrade/epas-major-pgupgrade.sh --link     # hard-link mode (not allowed with TDE)
-# or as root (pg_upgrade then runs via sudo -u SYSTEM_USER)
-sudo modules/04-upgrade/epas-major-pgupgrade.sh --root
 ```
 
 Steps: checks (versions, binaries, both clusters exist; the new one must already be built with
@@ -44,8 +42,6 @@ do initdb, TDE and conf.d; this one only copies data). **The old cluster is only
 modules/04-upgrade/epas-major-pgrestore.sh                    # every database that allows connections
 modules/04-upgrade/epas-major-pgrestore.sh --db sales --db hr # only these
 modules/04-upgrade/epas-major-pgrestore.sh --jobs 8 --dump-dir /backup/upg   # more parallelism, dumps elsewhere
-# or as root (tools run via sudo -u SYSTEM_USER)
-sudo modules/04-upgrade/epas-major-pgrestore.sh --root
 ```
 
 Steps: checks (versions actually running on both ports, new cluster built, dump dir not in /tmp or a data dir) →
