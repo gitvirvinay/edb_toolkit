@@ -66,8 +66,8 @@ openssl x509 -req -in "$WORKDIR/server.csr" \
   -extfile "$WORKDIR/server.ext"
 
 # --- 5. Pack into unified PEM Bundle (Key + Cert + CA) ------------------------
-# Order: encrypted key, server cert, root CA
-cat "$WORKDIR/server.key" "$WORKDIR/server.crt" "$WORKDIR/rootCA.crt" > "$OUTPUT_BUNDLE"
+# Order: server cert, root CA, encrypted key
+cat "$WORKDIR/server.crt" "$WORKDIR/rootCA.crt" "$WORKDIR/server.key" > "$OUTPUT_BUNDLE"
 chmod 0600 "$OUTPUT_BUNDLE"
 
 log_info "Encrypted self-signed bundle created: $OUTPUT_BUNDLE"

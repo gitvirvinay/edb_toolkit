@@ -11,10 +11,12 @@ The setup enforces end-to-end security for EPAS 17 database environments using s
 * **Encrypted Key Architecture:** The database private key (`server.key`) is stored in an encrypted format.
 * **Automated Decryption at Startup:** The passphrase is held in a protected file (`.ssl_key_passphrase`, `0400` permissions) accessed exclusively by an automated wrapper script (`read_passphrase.sh`, `0500` permissions) via the PostgreSQL parameter `ssl_passphrase_command`.
 * **Strict PEM Bundle Order:** To prevent key-certificate mismatches, the bundle structure is validated in the following order:
-  1. `-----BEGIN ENCRYPTED PRIVATE KEY-----` (Private Key)
-  2. `-----BEGIN CERTIFICATE-----` (Server / Leaf Certificate)
-  3. `-----BEGIN CERTIFICATE-----` (Intermediate CA Certificate(s) - optional)
-  4. `-----BEGIN CERTIFICATE-----` (Root CA Certificate)
+  1. `-----BEGIN CERTIFICATE-----` (Server / Leaf Certificate)
+  2. `-----BEGIN CERTIFICATE-----` (Intermediate CA Certificate(s) - optional)
+  3. `-----BEGIN CERTIFICATE-----` (Root CA Certificate)
+  4. `-----BEGIN ENCRYPTED PRIVATE KEY-----` (Private Key)
+
+  The certificate order (leaf first, root last) is the standard TLS chain order and is required. The private key sits at one end of the bundle: **after the root (recommended, what the generators write)**. A bundle with the key **first** (the older layout of this toolkit) is still accepted. A key between certificates is refused. The key must be encrypted.
 
 ---
 
@@ -85,9 +87,9 @@ Use this option for standalone instances or single-server testing environments u
 
 #### Option C: Commercial or Enterprise CA Certificates
 If using certificates issued by an internal PKI or public CA:
-Ensure the PEM file is concatenated in the enforced order:
+Ensure the PEM file is concatenated in the recommended order (certificates leaf to root, then the encrypted key; `server.key` must be an `ENCRYPTED PRIVATE KEY`, convert an old one with `openssl pkcs8 -topk8 -v2 aes256 -in old.key -out server.key`):
 ```bash
-cat server.key leaf.crt intermediate.crt root.crt > /tmp/epas_bundle.pem
+cat leaf.crt intermediate.crt root.crt server.key > /tmp/epas_bundle.pem
 ```
 
 ---
@@ -107,7 +109,7 @@ Options: `--restart` (restart instead of reload), `--passphrase-file FILE` (no p
 
 #### What the Setup Script Performs Automagically:
 1. Checks it runs as `SYSTEM_USER` (not root), that `SECURITY_TOP` exists and is owned by it, and how the cluster will be restarted (for systemd: that the sudoers rule is in place). All before anything changes.
-2. Verifies that the private key is encrypted and placed **before** certificate blocks in the PEM bundle.
+2. Verifies that the private key is encrypted and sits at one end of the PEM bundle (after the root, or before the leaf), and that the certificates are in chain order.
 3. Prompts for key passphrase and tests key decryption via OpenSSL (passphrase read from a private file, never on a command line).
 4. Builds every new file in a private temp directory and runs the checks there: RSA key modulus against the leaf certificate, expiry, chain, and **the certificate's names** (see *Certificate names* below: valid for this server and for every name in `SSL_SHARED_NAMES`). A failed check changes nothing.
 5. Backs up the current files to `${SECURITY_TOP}/.backup-<timestamp>-XXXX`, then replaces each one atomically (temp file + `mv`; a symbolic link is refused):

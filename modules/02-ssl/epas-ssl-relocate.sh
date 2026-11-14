@@ -116,12 +116,12 @@ else
     cp "$KEY" "${WORK}/key.pem"
 fi
 {
-    cat "${WORK}/key.pem"
     cat "$CERT"
     if [[ -n $CA ]]; then cat "$CA"
     else   # no CA file: repeat the last certificate of the chain, so the setup keeps the whole chain
         awk '/-BEGIN CERTIFICATE-/{buf=""; keep=1} keep{buf=buf $0 ORS} /-END CERTIFICATE-/{keep=0} END{printf "%s", buf}' "$CERT"
     fi
+    cat "${WORK}/key.pem"
 } > "${WORK}/bundle.pem"
 
 OLD_FILES=()

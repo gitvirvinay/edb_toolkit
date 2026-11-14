@@ -2,6 +2,16 @@
 
 What changed in edb_toolkit, newest first. Updated together with every change.
 
+## Unreleased (planned v3.3.0)
+
+**SSL bundle: the private key now goes last.** Certificates first (leaf, intermediates, root), then the encrypted key. Bundles with the key first
+are still accepted, so nothing built before breaks.
+
+- `epas-ssl-setup.sh` accepts the key after the last certificate or before the first one, and refuses a key between certificates
+  (new check `epas_ssl_bundle_order` in `lib/epas-ssl.sh`, 8 new tests in `tests/epas-ssl-unit.sh`).
+- `generate-selfsigned-san.sh`, `generate-selfsigned-single.sh` and `epas-ssl-relocate.sh` write the new order.
+- `02-ssl/README.md`: new order, Option C `cat` line.
+
 ## v3.2.1 - 2026-11-14
 
 **Documentation only. No script changes.** A review of every doc against the code found stale parts; they are fixed.
