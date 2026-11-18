@@ -1,0 +1,37 @@
+# Rebuilds the paste kit whenever main changes and publishes it to the
+# paste-kit-dist branch, so it can be opened and copied from github.com.
+# The branch is replaced (force-pushed) each time: one commit, no history growth.
+name: paste-kit
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: write           # needed to push the paste-kit-dist branch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history + tags, so the kit gets the right version
+
+      - name: Build the paste kit
+        run: bash tools/make-paste-kit.sh
+
+      - name: Publish to the paste-kit-dist branch
+        run: |
+          rm -rf /tmp/kit && mkdir /tmp/kit
+          cp dist/paste-kit-*/* /tmp/kit/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          src="$(git rev-parse --short HEAD)"
+          git switch --orphan paste-kit-dist
+          mkdir paste-kit
+          cp /tmp/kit/* paste-kit/
+          git add paste-kit
+          git commit -m "Paste kit built from main @ ${src}"
+          git push --force origin paste-kit-dist
